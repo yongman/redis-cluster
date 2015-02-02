@@ -1543,6 +1543,7 @@ void replicationUnsetMaster(void) {
              * replication offset to understand what is the most updated. */
             server.master_repl_offset = server.master->reploff;
             server.unset_master_reploff = server.master->reploff;
+            server.unset_master_ustime = ustime();
             /* Make sure our backlog buffer is empty */
             freeReplicationBacklog();
             /* Recreate it again */
@@ -2196,6 +2197,14 @@ void replicationCron(void) {
                         slave->replstate = REDIS_REPL_WAIT_BGSAVE_END;
                 }
             }
+        }
+    }
+
+    /* Discard the cached_master if I have became new master for a long time */
+    if (server.masterhost == NULL && server.cached_master != NULL) {
+        long long now = ustime();
+        if (now - server.unset_master_ustime*1000 > REDIS_CACHED_MASTER_EXPIRE_MS) {
+            replicationDiscardCachedMaster();
         }
     }
 

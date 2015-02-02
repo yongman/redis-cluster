@@ -98,6 +98,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_AUTHPASS_MAX_LEN 512
 #define REDIS_DEFAULT_SLAVE_PRIORITY 100
 #define REDIS_REPL_TIMEOUT 60
+#define REDIS_CACHED_MASTER_EXPIRE_MS (30*1000)
 #define REDIS_REPL_PING_SLAVE_PERIOD 10
 #define REDIS_RUN_ID_SIZE 40
 #define REDIS_EOF_MARK_SIZE 40
@@ -814,6 +815,7 @@ struct redisServer {
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     long long master_repl_offset;   /* Global replication offset */
     long long unset_master_reploff; /* Global replication offset when we became a master */
+    long long unset_master_ustime;  /* The time when we became a master */
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     char *repl_backlog;             /* Replication backlog for partial syncs */
     long long repl_backlog_size;    /* Backlog circular buffer size */
