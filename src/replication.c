@@ -1488,9 +1488,12 @@ void createRvsBacklog(void) {
 }
 
 void freeRvsBacklog(void) {
-    redisAssert(listLength(server.slaves) == 0);
+    if (server.rvs_backlog == NULL) return;
     zfree(server.rvs_backlog);
     server.rvs_backlog = NULL;
+    server.rvs_backlog_histlen = 0;
+    server.rvs_backlog_idx = 0;
+    server.rvs_fregment_len = 0;
 }
 
 void feedRvsBacklog(void *ptr, size_t len) {
@@ -2205,6 +2208,7 @@ void replicationCron(void) {
         long long now = ustime();
         if (now - server.unset_master_ustime*1000 > REDIS_CACHED_MASTER_EXPIRE_MS) {
             replicationDiscardCachedMaster();
+            freeRvsBacklog();
         }
     }
 
