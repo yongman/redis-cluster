@@ -325,6 +325,7 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     }
     backlog_size = server.repl_backlog_size;
 
+    redisLog(REDIS_NOTICE, "[PSYNC] RVS backlog: %d", rvs);
     redisLog(REDIS_DEBUG, "[PSYNC] Slave request offset: %lld", offset);
 
     if (backlog_histlen == 0) {
@@ -377,7 +378,7 @@ int masterTryPartialResynchronization(redisClient *c) {
     int rvs = 0;
 
     if (getLongLongFromObjectOrReply(c,c->argv[2],&psync_offset,NULL) !=
-       REDIS_OK) goto need_full_resync;
+        REDIS_OK) goto need_full_resync;
 
     /* Is the runid of this master the same advertised by the wannabe slave
      * via PSYNC? If runid changed this master is a different instance and
@@ -1479,6 +1480,7 @@ int cancelReplicationHandshake(void) {
 }
 
 void createRvsBacklog(void) {
+    redisLog(REDIS_NOTICE,"Create RVS backlog.");
     server.rvs_backlog = zmalloc(server.repl_backlog_size);
     server.rvs_backlog_histlen = 0;
     server.rvs_backlog_idx = 0;
@@ -1489,6 +1491,7 @@ void createRvsBacklog(void) {
 
 void freeRvsBacklog(void) {
     if (server.rvs_backlog == NULL) return;
+    redisLog(REDIS_NOTICE,"Free RVS backlog.");
     zfree(server.rvs_backlog);
     server.rvs_backlog = NULL;
     server.rvs_backlog_histlen = 0;
@@ -1514,7 +1517,7 @@ void feedRvsBacklog(void *ptr, size_t len) {
         server.rvs_backlog_histlen = server.repl_backlog_size;
     /* Set the offset of the first byte we have in the backlog. */
     server.rvs_backlog_off = server.master->reploff -
-                             server.rvs_backlog_histlen;
+                             server.rvs_backlog_histlen + 1;
 }
 
 /* Set replication to the specified master address and port. */
@@ -1561,12 +1564,11 @@ void replicationUnsetMaster(void) {
                 /* The first '\r' will be reset by the parser */
                 feedRvsBacklog("\r\r\n", 3);
             }
+        } else {
+            /* Don't do psync for our slibings if we have chained slaves */
+            replicationDiscardCachedMaster();
         }
         freeClient(server.master);
-    }
-    if (!server.master || listLength(server.slaves) != 0) {
-        /* Don't do psync for our slibings if we have chained slaves */
-        replicationDiscardCachedMaster();
     }
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_NONE;
