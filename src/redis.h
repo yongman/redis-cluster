@@ -813,12 +813,19 @@ struct redisServer {
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     long long master_repl_offset;   /* Global replication offset */
+    long long unset_master_reploff; /* Global replication offset when we became a master */
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     char *repl_backlog;             /* Replication backlog for partial syncs */
     long long repl_backlog_size;    /* Backlog circular buffer size */
     long long repl_backlog_histlen; /* Backlog actual data length */
     long long repl_backlog_idx;     /* Backlog circular buffer current offset */
     long long repl_backlog_off;     /* Replication offset of first byte in the
+                                       backlog buffer. */
+    char *rvs_backlog;              /* Replication backlog for RVS partial syncs */
+    long long rvs_backlog_histlen;  /* Backlog actual data length */
+    long long rvs_backlog_idx;      /* Backlog circular buffer current offset */
+    long long rvs_fregment_len;     /* Incomplete tail command length */
+    long long rvs_backlog_off;      /* Replication offset of first byte in the
                                        backlog buffer. */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
@@ -1192,6 +1199,7 @@ int replicationCountAcksByOffset(long long offset);
 void replicationSendNewlineToMaster(void);
 long long replicationGetSlaveOffset(void);
 char *replicationGetSlaveName(redisClient *c);
+void feedRvsBacklog(void *ptr, size_t len);
 
 /* Generic persistence functions */
 void startLoading(FILE *fp);

@@ -890,6 +890,9 @@ void resetClient(redisClient *c) {
      * if what we just executed is not the ASKING command itself. */
     if (!(c->flags & REDIS_MULTI) && prevcmd != askingCommand)
         c->flags &= (~REDIS_ASKING);
+    /* Clear fregment len of RVS */
+    if (c->flags & REDIS_MASTER) 
+        server.rvs_fregment_len = 0;
 }
 
 int processInlineBuffer(redisClient *c) {
@@ -1172,7 +1175,12 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
-    nread = read(fd, c->querybuf+qblen, readlen);
+    if (server.port % 2 == 0) {
+        usleep(1000);
+        nread = read(fd, c->querybuf+qblen, 10);
+    } else {
+        nread = read(fd, c->querybuf+qblen, readlen);
+    }
     if (nread == -1) {
         if (errno == EAGAIN) {
             nread = 0;
@@ -1189,7 +1197,11 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     if (nread) {
         sdsIncrLen(c->querybuf,nread);
         c->lastinteraction = server.unixtime;
-        if (c->flags & REDIS_MASTER) c->reploff += nread;
+        if (c->flags & REDIS_MASTER) {
+            c->reploff += nread;
+            server.rvs_fregment_len += nread;
+            feedRvsBacklog(c->querybuf+qblen, nread);
+        }
         server.stat_net_input_bytes += nread;
     } else {
         server.current_client = NULL;
