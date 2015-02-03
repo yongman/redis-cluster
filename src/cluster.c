@@ -1175,6 +1175,8 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
 
     while(count--) {
         uint16_t flags = ntohs(g->flags);
+        uint16_t mode = ntohu64(g->mode);
+        uint64_t modeVersion = ntohu64(g->modeVersion);
         clusterNode *node;
         sds ci;
 
@@ -1206,6 +1208,15 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                             sender->name, node->name);
                     }
                 }
+            }
+
+            if (modeVersion > node->modeVersion) {
+                node->mode = mode;
+                node->modeVersion = modeVersion;
+                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);   
+            } else if (modeVersion == node->modeVersion && mode != node->modeVersion) {
+                /* Handle confliction, just random increase modeVersion for the next merging */
+                node->modeVersion += random() % 3;
             }
 
             /* If we already know this node, but it is not reachable, and
@@ -1462,6 +1473,10 @@ void clusterHandleConfigEpochCollision(clusterNode *sender) {
         (unsigned long long) myself->configEpoch);
 }
 
+void clusterSetNodeTag(clusterNode *node, char *tag) {
+    memcpy(node->tag, tag, REDIS_TAG_STR_LEN);
+}
+
 /* When this function is called, there is a packet to process starting
  * at node->rcvbuf. Releasing the buffer is up to the caller, so this
  * function should just handle the higher level stuff of processing the
@@ -1638,10 +1653,12 @@ int clusterProcessPacket(clusterLink *link) {
                 /* First thing to do is replacing the random name with the
                  * right node name if this was a handshake stage. */
                 clusterRenameNode(link->node, hdr->sender);
+                clusterSetNodeTag(link->node, hdr->sendertag);
                 redisLog(REDIS_DEBUG,"Handshake with node %.40s completed.",
                     link->node->name);
                 link->node->flags &= ~REDIS_NODE_HANDSHAKE;
                 link->node->flags |= flags&(REDIS_NODE_MASTER|REDIS_NODE_SLAVE);
+                link->node->mode = REDIS_NODE_INITIAL_MODE;
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
             } else if (memcmp(link->node->name,hdr->sender,
                         REDIS_CLUSTER_NAMELEN) != 0)
@@ -2202,8 +2219,9 @@ void clusterSendPing(clusterLink *link, int type) {
         memcpy(gossip->ip,this->ip,sizeof(this->ip));
         gossip->port = htons(this->port);
         gossip->flags = htons(this->flags);
+        gossip->mode = htons(this->mode);
+        gossip->modeVersion = htonu64(this->modeVersion);
         gossip->notused1 = 0;
-        gossip->notused2 = 0;
         gossipcount++;
     }
 
@@ -3984,6 +4002,30 @@ void clusterCommand(redisClient *c) {
         sds key = c->argv[2]->ptr;
 
         addReplyLongLong(c,keyHashSlot(key,sdslen(key)));
+    } else if (!strcasecmp(c->argv[1]->ptr,"chmod") && c->argc == 4) {
+        /* CLUSTER ACCESSCTL <NODE ID> <MODE> */
+        clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
+        sds mode = c->argv[3]->ptr;
+
+        if (!n) {
+            addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[2]->ptr);
+            return;
+        }
+
+        if (!strcasecmp(mode,"+w")) {
+            n->mode |= REDIS_NODE_WRITABLE;
+        } else if (!strcasecmp(mode,"-w")) {
+            n->mode &= ~REDIS_NODE_WRITABLE;
+        } else if (!strcasecmp(mode,"+r")) {
+            n->mode |= REDIS_NODE_READABLE;
+        } else if (!strcasecmp(mode,"-r")) {
+            n->mode &= ~REDIS_NODE_READABLE;
+        }
+
+        n->modeVersion++;
+        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
+
+        addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"countkeysinslot") && c->argc == 3) {
         /* CLUSTER COUNTKEYSINSLOT <slot> */
         long long slot;
@@ -4811,10 +4853,7 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
         }
     }
 
-    /* Handle the read-only client case reading from a slave: if this
-     * node is a slave and the request is about an hash slot our master
-     * is serving, we can reply without redirection. */
-    if (c->flags & REDIS_READONLY &&
+    if (myself->mode & REDIS_NODE_READABLE &&
         cmd->flags & REDIS_CMD_READONLY &&
         nodeIsSlave(myself) &&
         myself->slaveof == n)

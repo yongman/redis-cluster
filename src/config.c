@@ -168,6 +168,8 @@ void loadServerConfigFromString(char *config) {
                     argv[1], strerror(errno));
                 exit(1);
             }
+        } else if (!strcasecmp(argv[0],"tag") && argc == 2) {
+            strncpy(server.tag, argv[1], REDIS_TAG_STR_LEN);
         } else if (!strcasecmp(argv[0],"loglevel") && argc == 2) {
             if (!strcasecmp(argv[1],"debug")) server.verbosity = REDIS_DEBUG;
             else if (!strcasecmp(argv[1],"verbose")) server.verbosity = REDIS_VERBOSE;
@@ -1076,6 +1078,7 @@ void configGetCommand(redisClient *c) {
     config_get_string_field("unixsocket",server.unixsocket);
     config_get_string_field("logfile",server.logfile);
     config_get_string_field("pidfile",server.pidfile);
+    config_get_string_field("tag",server.tag);
 
     /* Numerical values */
     config_get_numerical_field("maxmemory",server.maxmemory);
