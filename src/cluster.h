@@ -86,6 +86,7 @@ typedef struct clusterNode {
     char name[REDIS_CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
     char tag[REDIS_TAG_STR_LEN]; /* Node tag */
     int flags;      /* REDIS_NODE_... */
+    /* Mode is used by outside tools rather than cluster itself */
     int mode;       /* Permissions (read,write) */
     uint64_t modeVersion; /* Permission version for broadcasting update */
     uint64_t configEpoch; /* Last configEpoch observed for this node */
@@ -259,5 +260,6 @@ typedef struct {
 
 /* ---------------------- API exported outside cluster.c -------------------- */
 clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *ask);
+void clusterSetNodeTag(clusterNode *node, const char *tag);
 
 #endif /* __REDIS_CLUSTER_H */

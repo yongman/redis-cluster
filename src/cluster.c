@@ -56,7 +56,7 @@ void clusterSendFail(char *nodename);
 void clusterSendFailoverAuthIfNeeded(clusterNode *node, clusterMsg *request);
 void clusterUpdateState(void);
 int clusterNodeGetSlotBit(clusterNode *n, int slot);
-sds clusterGenNodesDescription(int filter);
+sds clusterGenNodesDescription(int filter, int extra);
 clusterNode *clusterLookupNode(char *name);
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave);
 int clusterAddSlot(clusterNode *n, int slot);
@@ -318,7 +318,7 @@ int clusterSaveConfig(int do_fsync) {
 
     /* Get the nodes description and concatenate our "vars" directive to
      * save currentEpoch and lastVoteEpoch. */
-    ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE);
+    ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE,0);
     ci = sdscatprintf(ci,"vars currentEpoch %llu lastVoteEpoch %llu\n",
         (unsigned long long) server.cluster->currentEpoch,
         (unsigned long long) server.cluster->lastVoteEpoch);
@@ -441,6 +441,8 @@ void clusterInit(void) {
         clusterAddNode(myself);
         saveconf = 1;
     }
+    /* Anyway, use redisSever.tag as cluster node tag */
+    clusterSetNodeTag(myself, server.tag);
     if (saveconf) clusterSaveConfigOrDie(1);
 
     /* We need a listening TCP port for our cluster messaging needs. */
@@ -663,9 +665,12 @@ clusterNode *createClusterNode(char *nodename, int flags) {
         memcpy(node->name, nodename, REDIS_CLUSTER_NAMELEN);
     else
         getRandomHexChars(node->name, REDIS_CLUSTER_NAMELEN);
+    node->tag[0] = '\0';
     node->ctime = mstime();
     node->configEpoch = 0;
     node->flags = flags;
+    node->mode = REDIS_NODE_INITIAL_MODE;
+    node->modeVersion = 0;
     memset(node->slots,0,sizeof(node->slots));
     node->numslots = 0;
     node->numslaves = 0;
@@ -1175,7 +1180,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
 
     while(count--) {
         uint16_t flags = ntohs(g->flags);
-        uint16_t mode = ntohu64(g->mode);
+        uint16_t mode = ntohs(g->mode);
         uint64_t modeVersion = ntohu64(g->modeVersion);
         clusterNode *node;
         sds ci;
@@ -1214,7 +1219,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 node->mode = mode;
                 node->modeVersion = modeVersion;
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);   
-            } else if (modeVersion == node->modeVersion && mode != node->modeVersion) {
+            } else if (modeVersion == node->modeVersion && mode != node->mode) {
                 /* Handle confliction, just random increase modeVersion for the next merging */
                 node->modeVersion += random() % 3;
             }
@@ -1473,8 +1478,8 @@ void clusterHandleConfigEpochCollision(clusterNode *sender) {
         (unsigned long long) myself->configEpoch);
 }
 
-void clusterSetNodeTag(clusterNode *node, char *tag) {
-    memcpy(node->tag, tag, REDIS_TAG_STR_LEN);
+void clusterSetNodeTag(clusterNode *node, const char *tag) {
+    strncpy(node->tag, tag, REDIS_TAG_STR_LEN);
 }
 
 /* When this function is called, there is a packet to process starting
@@ -1620,6 +1625,9 @@ int clusterProcessPacket(clusterLink *link) {
         if (!sender && type == CLUSTERMSG_TYPE_MEET)
             clusterProcessGossipSection(hdr,link);
 
+        /* Update the sender tag since it maybe changed via config set */
+        clusterSetNodeTag(sender, hdr->sendertag);
+
         /* Anyway reply with a PONG */
         clusterSendPing(link,CLUSTERMSG_TYPE_PONG);
     }
@@ -1653,12 +1661,10 @@ int clusterProcessPacket(clusterLink *link) {
                 /* First thing to do is replacing the random name with the
                  * right node name if this was a handshake stage. */
                 clusterRenameNode(link->node, hdr->sender);
-                clusterSetNodeTag(link->node, hdr->sendertag);
                 redisLog(REDIS_DEBUG,"Handshake with node %.40s completed.",
                     link->node->name);
                 link->node->flags &= ~REDIS_NODE_HANDSHAKE;
                 link->node->flags |= flags&(REDIS_NODE_MASTER|REDIS_NODE_SLAVE);
-                link->node->mode = REDIS_NODE_INITIAL_MODE;
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
             } else if (memcmp(link->node->name,hdr->sender,
                         REDIS_CLUSTER_NAMELEN) != 0)
@@ -1715,7 +1721,7 @@ int clusterProcessPacket(clusterLink *link) {
             } else {
                 /* Node is a slave. */
                 clusterNode *master = clusterLookupNode(hdr->slaveof);
-
+                
                 if (nodeIsMaster(sender)) {
                     /* Master turned into a slave! Reconfigure the node. */
                     clusterDelNodeSlots(sender);
@@ -1728,6 +1734,15 @@ int clusterProcessPacket(clusterLink *link) {
                     /* Update config and state. */
                     clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                                          CLUSTER_TODO_UPDATE_STATE);
+                }
+
+                /* We need do this because at the time a node created, we set
+                 * its mode to 'rw'. This info is not important since the proxy
+                 * don't use 'w' for slave, we change this just for better 
+                 * looking -- It is '-r' for slave instead of 'rw'. */
+                if (sender->mode & REDIS_NODE_WRITABLE) {
+                    sender->mode &= ~REDIS_NODE_WRITABLE;
+                    sender->modeVersion++;
                 }
 
                 /* Master node changed for this slave? */
@@ -2077,6 +2092,7 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     hdr->sig[3] = 'b';
     hdr->type = htons(type);
     memcpy(hdr->sender,myself->name,REDIS_CLUSTER_NAMELEN);
+    memcpy(hdr->sendertag,myself->tag,REDIS_TAG_STR_LEN);
 
     memcpy(hdr->myslots,master->slots,sizeof(hdr->myslots));
     memset(hdr->slaveof,0,REDIS_CLUSTER_NAMELEN);
@@ -3566,12 +3582,23 @@ sds representRedisNodeFlags(sds ci, uint16_t flags) {
  * See clusterGenNodesDescription() top comment for more information.
  *
  * The function returns the string representation as an SDS string. */
-sds clusterGenNodeDescription(clusterNode *node) {
+sds clusterGenNodeDescription(clusterNode *node, int extra) {
     int j, start;
-    sds ci;
+    sds ci = sdsempty();
+
+    if (extra) {
+        ci = sdscatlen(ci,(node->mode&REDIS_NODE_READABLE)?"r":"-",1);
+        ci = sdscatlen(ci,(node->mode&REDIS_NODE_WRITABLE)?"w":"-",1);
+
+        if (strlen(node->tag)) {
+            ci = sdscatprintf(ci," %s ",node->tag);
+        } else {
+            ci = sdscatlen(ci," - ",3);
+        }
+    }
 
     /* Node coordinates */
-    ci = sdscatprintf(sdsempty(),"%.40s %s:%d ",
+    ci = sdscatprintf(ci,"%.40s %s:%d ",
         node->name,
         node->ip,
         node->port);
@@ -3642,7 +3669,7 @@ sds clusterGenNodeDescription(clusterNode *node) {
  * The representation obtained using this function is used for the output
  * of the CLUSTER NODES function, and as format for the cluster
  * configuration file (nodes.conf) for a given node. */
-sds clusterGenNodesDescription(int filter) {
+sds clusterGenNodesDescription(int filter, int extra) {
     sds ci = sdsempty(), ni;
     dictIterator *di;
     dictEntry *de;
@@ -3652,7 +3679,7 @@ sds clusterGenNodesDescription(int filter) {
         clusterNode *node = dictGetVal(de);
 
         if (node->flags & filter) continue;
-        ni = clusterGenNodeDescription(node);
+        ni = clusterGenNodeDescription(node,extra);
         ci = sdscatsds(ci,ni);
         sdsfree(ni);
         ci = sdscatlen(ci,"\n",1);
@@ -3770,10 +3797,11 @@ void clusterCommand(redisClient *c) {
         } else {
             addReply(c,shared.ok);
         }
-    } else if (!strcasecmp(c->argv[1]->ptr,"nodes") && c->argc == 2) {
+    } else if (!strcasecmp(c->argv[1]->ptr,"nodes") && 
+               (c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
         /* CLUSTER NODES */
         robj *o;
-        sds ci = clusterGenNodesDescription(0);
+        sds ci = clusterGenNodesDescription(0,c->argc-2);
 
         o = createObject(REDIS_STRING,ci);
         addReplyBulk(c,o);
@@ -4003,9 +4031,9 @@ void clusterCommand(redisClient *c) {
 
         addReplyLongLong(c,keyHashSlot(key,sdslen(key)));
     } else if (!strcasecmp(c->argv[1]->ptr,"chmod") && c->argc == 4) {
-        /* CLUSTER ACCESSCTL <NODE ID> <MODE> */
-        clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
-        sds mode = c->argv[3]->ptr;
+        /* CLUSTER CHMOD <MODE> <NODE ID> */
+        clusterNode *n = clusterLookupNode(c->argv[3]->ptr);
+        sds mode = c->argv[2]->ptr;
 
         if (!n) {
             addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[2]->ptr);
@@ -4021,10 +4049,9 @@ void clusterCommand(redisClient *c) {
         } else if (!strcasecmp(mode,"-r")) {
             n->mode &= ~REDIS_NODE_READABLE;
         }
-
         n->modeVersion++;
-        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
 
+        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"countkeysinslot") && c->argc == 3) {
         /* CLUSTER COUNTKEYSINSLOT <slot> */
@@ -4114,7 +4141,7 @@ void clusterCommand(redisClient *c) {
         clusterSetMaster(n);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE|CLUSTER_TODO_SAVE_CONFIG);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"slaves") && c->argc == 3) {
+    } else if (!strcasecmp(c->argv[1]->ptr,"slaves") && (c->argc == 3 || c->argc == 4)) {
         /* CLUSTER SLAVES <NODE ID> */
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
         int j;
@@ -4132,7 +4159,7 @@ void clusterCommand(redisClient *c) {
 
         addReplyMultiBulkLen(c,n->numslaves);
         for (j = 0; j < n->numslaves; j++) {
-            sds ni = clusterGenNodeDescription(n->slaves[j]);
+            sds ni = clusterGenNodeDescription(n->slaves[j],c->argc-3);
             addReplyBulkCString(c,ni);
             sdsfree(ni);
         }
@@ -4840,6 +4867,8 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
         }
     }
 
+    /* The REDIS_READONLY flag is ignored, we just can read slaves by 
+     * default as long as they are readable. */
     if (myself->mode & REDIS_NODE_READABLE &&
         cmd->flags & REDIS_CMD_READONLY &&
         nodeIsSlave(myself) &&
