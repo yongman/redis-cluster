@@ -1498,6 +1498,7 @@ void initServerConfig(void) {
     server.repl_diskless_sync_delay = REDIS_DEFAULT_REPL_DISKLESS_SYNC_DELAY;
     server.slave_priority = REDIS_DEFAULT_SLAVE_PRIORITY;
     server.master_repl_offset = 0;
+    server.fullsync_repl_offset = 0;
 
     /* Replication partial resync backlog */
     server.repl_backlog = NULL;

@@ -365,6 +365,20 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     return backlog_histlen - skip;
 }
 
+static redisClient* slaveWithReplState(int state) {
+    redisClient *slave = NULL;
+    listNode *ln;
+    listIter li;
+
+    listRewind(server.slaves,&li);
+    while((ln = listNext(&li))) {
+        slave = ln->value;
+        if (slave->replstate == state) break;
+    }
+
+    return slave;
+}
+
 /* This function handles the PSYNC command from the point of view of a
  * master receiving a request for partial resynchronization.
  *
@@ -470,8 +484,16 @@ int masterTryPartialResynchronization(redisClient *c) {
     return REDIS_OK; /* The caller can return, no full resync needed. */
 
 need_full_resync:
-    /* We need a full resync for some reason... notify the client. */
-    psync_offset = server.master_repl_offset;
+    /* We need a full resync for some reason... notify the client. If a background 
+     * save is in progress, we should use the offset of the first one. */
+    if (slaveWithReplState(REDIS_REPL_WAIT_BGSAVE_END) && server.fullsync_repl_offset > 0) {
+        psync_offset = server.fullsync_repl_offset;
+    } else {
+        psync_offset = server.master_repl_offset;
+        /* If this is the first slave requesting a fullsync, we should backup the offset 
+         * for the following ones that sharing the same rdbdump. */
+        server.fullsync_repl_offset = psync_offset;
+    }
     /* Add 3 to psync_offset if it the replication backlog does not exists
      * as when it will be created later we'll increment the offset by three. */
     if (server.repl_backlog == NULL) psync_offset += 3;
@@ -571,16 +593,8 @@ void syncCommand(redisClient *c) {
         /* Ok a background save is in progress. Let's check if it is a good
          * one for replication, i.e. if there is another slave that is
          * registering differences since the server forked to save. */
-        redisClient *slave;
-        listNode *ln;
-        listIter li;
-
-        listRewind(server.slaves,&li);
-        while((ln = listNext(&li))) {
-            slave = ln->value;
-            if (slave->replstate == REDIS_REPL_WAIT_BGSAVE_END) break;
-        }
-        if (ln) {
+        redisClient *slave = slaveWithReplState(REDIS_REPL_WAIT_BGSAVE_END);
+        if (slave) {
             /* Perfect, the server is already registering differences for
              * another slave. Set the right state, and copy the buffer. */
             copyClientOutputBuffer(c,slave);
@@ -821,6 +835,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                  * is technically online now. */
                 slave->replstate = REDIS_REPL_ONLINE;
                 slave->repl_put_online_on_ack = 1;
+                server.fullsync_repl_offset = -1;
             } else {
                 if (bgsaveerr != REDIS_OK) {
                     freeClient(slave);
@@ -838,6 +853,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                 slave->replstate = REDIS_REPL_SEND_BULK;
                 slave->replpreamble = sdscatprintf(sdsempty(),"$%lld\r\n",
                     (unsigned long long) slave->repldbsize);
+                server.fullsync_repl_offset = -1;
 
                 aeDeleteFileEvent(server.el,slave->fd,AE_WRITABLE);
                 if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE, sendBulkToSlave, slave) == AE_ERR) {

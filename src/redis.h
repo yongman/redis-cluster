@@ -814,6 +814,8 @@ struct redisServer {
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     long long master_repl_offset;   /* Global replication offset */
+    long long fullsync_repl_offset; /* Fullsync replication offset of the first one, used 
+                                       when more than one slaves share the same bgsave */
     long long unset_master_reploff; /* Global replication offset when we became a master */
     long long unset_master_ustime;  /* The time when we became a master */
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
