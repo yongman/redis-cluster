@@ -1254,7 +1254,7 @@ int slaveTryPartialResynchronization(int fd) {
                  "Successful partial resynchronization with master %40s.",
                  runid);
         sdsfree(reply);
-        /* If this is a psync via slibing, force our slaves to resync with us since
+        /* If this is a psync via siblings, force our slaves to resync with us since
          * we will modify the reploff of our master link. */
         if (strncmp(server.cached_master->replrunid,runid,REDIS_RUN_ID_SIZE)) {
             disconnectSlaves();
@@ -1556,7 +1556,7 @@ void replicationSetMaster(char *ip, int port) {
     if (server.master) {
         /* If we were a slave, don't dicard cached master immediately
          * so that we still have the opportunity to do psync with our
-         * slibings. */
+         * siblings. */
         freeClient(server.master);
     } else {
         /* If we were a master, nerver psync with anybody. */
@@ -1596,7 +1596,7 @@ void replicationUnsetMaster(void) {
                 server.unset_master_reploff -= server.rvs_fregment_len;
             }
         } else {
-            /* Don't do psync for our slibings if we have chained slaves */
+            /* Don't do psync for our siblings if we have chained slaves */
             replicationDiscardCachedMaster();
         }
         freeClient(server.master);
