@@ -2250,6 +2250,7 @@ void replicationCron(void) {
     if (server.masterhost == NULL && server.cached_master != NULL) {
         long long now = ustime();
         if (now - server.unset_master_ustime*1000 > REDIS_CACHED_MASTER_EXPIRE_MS) {
+            redisLog(REDIS_NOTICE, "Cached master expired.");
             replicationDiscardCachedMaster();
             freeRvsBacklog();
         }
