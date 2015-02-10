@@ -1259,7 +1259,6 @@ int slaveTryPartialResynchronization(int fd) {
         if (strncmp(server.cached_master->replrunid,runid,REDIS_RUN_ID_SIZE)) {
             disconnectSlaves();
             freeReplicationBacklog();
-            cancelReplicationHandshake();
         }
         replicationResurrectCachedMaster(fd,runid);
         return PSYNC_CONTINUE;
@@ -1554,10 +1553,16 @@ void replicationSetMaster(char *ip, int port) {
     sdsfree(server.masterhost);
     server.masterhost = sdsnew(ip);
     server.masterport = port;
-    if (server.master) freeClient(server.master);
+    if (server.master) {
+        /* If we were a slave, don't dicard cached master immediately
+         * so that we still have the opportunity to do psync with our
+         * slibings. */
+        freeClient(server.master);
+    } else {
+        /* If we were a master, nerver psync with anybody. */
+        replicationDiscardCachedMaster();
+    }
     disconnectSlaves(); /* Force our slaves to resync with us as well. */
-    /* We don't dicard cached master immediately to keep the opportunity 
-       to do psync with my slibings */
     freeReplicationBacklog(); /* Don't allow our chained slaves to PSYNC. */
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_CONNECT;
@@ -2241,7 +2246,7 @@ void replicationCron(void) {
         }
     }
 
-    /* Discard the cached_master if I have became new master for a long time */
+    /* Discard the cached_master if we have became new master for a long time */
     if (server.masterhost == NULL && server.cached_master != NULL) {
         long long now = ustime();
         if (now - server.unset_master_ustime*1000 > REDIS_CACHED_MASTER_EXPIRE_MS) {
