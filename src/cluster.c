@@ -3884,7 +3884,7 @@ void clusterCommand(redisClient *c) {
         if ((slot = getSlotOrReply(c,c->argv[2])) == -1) return;
 
         if (!strcasecmp(c->argv[3]->ptr,"migrating") && c->argc == 5) {
-            if (server.cluster->slots[slot] != myself) {
+            if (server.cluster->slots[slot] != myself && server.cluster->slots[slot] != myself->slaveof) {
                 addReplyErrorFormat(c,"I'm not the owner of hash slot %u",slot);
                 return;
             }
@@ -4818,7 +4818,7 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
                  * can safely serve the request, otherwise we return a TRYAGAIN
                  * error). To do so we set the importing/migrating state and
                  * increment a counter for every missing key. */
-                if (n == myself &&
+                if ((n == myself || n == myself->slaveof) &&
                     server.cluster->migrating_slots_to[slot] != NULL)
                 {
                     migrating_slot = 1;
