@@ -1174,6 +1174,17 @@ int clusterStartHandshake(char *ip, int port) {
     return 1;
 }
 
+void nodeUpdateMode(clusterNode *node, uint16_t mode, uint64_t modeVersion) {
+    if (modeVersion > node->modeVersion) {
+        node->mode = mode;
+        node->modeVersion = modeVersion;
+        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);   
+    } else if (modeVersion == node->modeVersion && mode != node->mode) {
+        /* Handle confliction, just random increase modeVersion for the next merging */
+        node->modeVersion += random() % 3;
+    }
+}
+
 /* Process the gossip section of PING or PONG packets.
  * Note that this function assumes that the packet is already sanity-checked
  * by the caller, not in the content of the gossip section, but in the
@@ -1219,16 +1230,8 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                     }
                 }
             }
-
-            if (modeVersion > node->modeVersion) {
-                node->mode = mode;
-                node->modeVersion = modeVersion;
-                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);   
-            } else if (modeVersion == node->modeVersion && mode != node->mode) {
-                /* Handle confliction, just random increase modeVersion for the next merging */
-                node->modeVersion += random() % 3;
-            }
-
+            /* Update node mode if modeVersion changed */
+            nodeUpdateMode(node, mode, modeVersion);
             /* If we already know this node, but it is not reachable, and
              * we see a different address in the gossip section, start an
              * handshake with the (possibly) new address: this will result
@@ -1501,6 +1504,8 @@ int clusterProcessPacket(clusterLink *link) {
     uint32_t totlen = ntohl(hdr->totlen);
     uint16_t type = ntohs(hdr->type);
     uint16_t flags = ntohs(hdr->flags);
+    uint16_t mode = ntohs(hdr->mode);
+    uint64_t modeVersion = ntohu64(hdr->modeVersion);
     uint64_t senderCurrentEpoch = 0, senderConfigEpoch = 0;
     clusterNode *sender;
 
@@ -1566,6 +1571,8 @@ int clusterProcessPacket(clusterLink *link) {
         /* Update the replication offset info for this node. */
         sender->repl_offset = ntohu64(hdr->offset);
         sender->repl_offset_time = mstime();
+        /* Update mode of sender if changed */
+        nodeUpdateMode(sender, mode, modeVersion);
         /* If we are a slave performing a manual failover and our master
          * sent its offset while already paused, populate the MF state. */
         if (server.cluster->mf_end &&
@@ -2106,6 +2113,8 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     hdr->port = htons(server.port);
     hdr->flags = htons(myself->flags);
     hdr->state = server.cluster->state;
+    hdr->mode = htons(myself->mode);
+    hdr->modeVersion = htonu64(myself->modeVersion);
 
     /* Set the currentEpoch and configEpochs. */
     hdr->currentEpoch = htonu64(server.cluster->currentEpoch);
@@ -4041,7 +4050,7 @@ void clusterCommand(redisClient *c) {
         sds mode = c->argv[2]->ptr;
 
         if (!n) {
-            addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[2]->ptr);
+            addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[3]->ptr);
             return;
         }
 
