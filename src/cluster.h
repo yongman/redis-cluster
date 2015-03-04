@@ -245,6 +245,7 @@ typedef struct {
     uint16_t port;      /* Sender TCP base port */
     uint16_t flags;     /* Sender node flags */
     uint16_t mode;      /* Sender mode flags */
+    uint64_t modeVersion;/* Sender mode flags version */
     unsigned char state; /* Cluster state from the POV of the sender */
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
     union clusterMsgData data;
