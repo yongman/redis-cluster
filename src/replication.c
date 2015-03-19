@@ -399,7 +399,7 @@ int masterTryPartialResynchronization(redisClient *c) {
             redisLog(REDIS_NOTICE,"Full resync requested by slave %s",
                 replicationGetSlaveName(c));
             goto need_full_resync;
-        } else if (server.cached_master) {
+        } else if (server.masterhost == NULL && server.cached_master) {
             /* Try psync with same source */
             if (strcasecmp(master_runid, server.cached_master->replrunid)) {
                 redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: Runid mismatch "
@@ -407,7 +407,7 @@ int masterTryPartialResynchronization(redisClient *c) {
                          master_runid, server.runid, server.cached_master->replrunid);
                 goto need_full_resync;
             }
-            if (psync_offset > server.unset_master_reploff) {
+            if (psync_offset > server.unset_master_reploff+1) {
                 redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: Lack of backlog"
                          "(Slave request psync_offset was '%lld', my unset_master_reploff is '%lld').",
                          psync_offset, server.unset_master_reploff);
@@ -1550,6 +1550,10 @@ void feedRvsBacklog(void *ptr, size_t len) {
 
 /* Set replication to the specified master address and port. */
 void replicationSetMaster(char *ip, int port) {
+    if (server.masterhost == NULL) {
+        /* If we were a master, never psync with anybody. */
+        replicationDiscardCachedMaster();
+    }
     sdsfree(server.masterhost);
     server.masterhost = sdsnew(ip);
     server.masterport = port;
@@ -1558,9 +1562,6 @@ void replicationSetMaster(char *ip, int port) {
          * so that we still have the opportunity to do psync with our
          * siblings. */
         freeClient(server.master);
-    } else {
-        /* If we were a master, nerver psync with anybody. */
-        replicationDiscardCachedMaster();
     }
     disconnectSlaves(); /* Force our slaves to resync with us as well. */
     freeReplicationBacklog(); /* Don't allow our chained slaves to PSYNC. */
@@ -1586,20 +1587,25 @@ void replicationUnsetMaster(void) {
             server.unset_master_ustime = ustime();
             /* Make sure our backlog buffer is empty */
             freeReplicationBacklog();
-            /* Recreate it again */
-            createReplicationBacklog();
-            /* We need trim the fregment (incomplete) command in the end of 
-             * RVS backlog, otherwise it will cause incorrect command 
-             * sending to the slaves. */
-            if (server.rvs_backlog) {
-                server.rvs_backlog_histlen -= server.rvs_fregment_len;
-                server.unset_master_reploff -= server.rvs_fregment_len;
-            }
-        } else {
-            /* Don't do psync for our siblings if we have chained slaves */
-            replicationDiscardCachedMaster();
         }
         freeClient(server.master);
+    }
+    /* We need trim the fregment (incomplete) command in the end of 
+     * RVS backlog, otherwise it will cause incorrect command 
+     * sending to the slaves. */
+    if (server.rvs_backlog) {
+        server.rvs_backlog_histlen -= server.rvs_fregment_len;
+        server.unset_master_reploff -= server.rvs_fregment_len;
+    }
+    /* Don't do psync for our siblings if we have chained slaves */
+    if (listLength(server.slaves) > 0) {
+        replicationDiscardCachedMaster();
+    } else {
+        server.master_repl_offset = server.unset_master_reploff;
+    }
+    /* Always have a repl backlog for master */
+    if (server.repl_backlog == NULL) {
+        createReplicationBacklog();
     }
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_NONE;
@@ -1758,6 +1764,10 @@ void replicationCacheMaster(redisClient *c) {
         sdsfree(c->peerid);
         c->peerid = NULL;
     }
+
+    /* Cache offset when master gone. */
+    server.unset_master_reploff = server.master->reploff;
+    server.unset_master_ustime = ustime();
 
     /* Caching the master happens instead of the actual freeClient() call,
      * so make sure to adjust the replication state. This function will
