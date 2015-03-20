@@ -1583,8 +1583,6 @@ void replicationUnsetMaster(void) {
              * Under certain conditions this makes replicas comparable by
              * replication offset to understand what is the most updated. */
             server.master_repl_offset = server.master->reploff;
-            server.unset_master_reploff = server.master->reploff;
-            server.unset_master_ustime = ustime();
             /* Make sure our backlog buffer is empty */
             freeReplicationBacklog();
         }
@@ -1602,6 +1600,8 @@ void replicationUnsetMaster(void) {
         replicationDiscardCachedMaster();
     } else {
         server.master_repl_offset = server.unset_master_reploff;
+        server.unset_master_reploff = server.master->reploff;
+        server.unset_master_ustime = ustime();
     }
     /* Always have a repl backlog for master */
     if (server.repl_backlog == NULL) {
@@ -1767,7 +1767,6 @@ void replicationCacheMaster(redisClient *c) {
 
     /* Cache offset when master gone. */
     server.unset_master_reploff = server.master->reploff;
-    server.unset_master_ustime = ustime();
 
     /* Caching the master happens instead of the actual freeClient() call,
      * so make sure to adjust the replication state. This function will
