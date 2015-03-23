@@ -1583,6 +1583,7 @@ void replicationUnsetMaster(void) {
              * Under certain conditions this makes replicas comparable by
              * replication offset to understand what is the most updated. */
             server.master_repl_offset = server.master->reploff;
+            server.unset_master_reploff = server.master->reploff;
             /* Make sure our backlog buffer is empty */
             freeReplicationBacklog();
         }
@@ -1600,7 +1601,6 @@ void replicationUnsetMaster(void) {
         replicationDiscardCachedMaster();
     } else {
         server.master_repl_offset = server.unset_master_reploff;
-        server.unset_master_reploff = server.master->reploff;
         server.unset_master_ustime = ustime();
     }
     /* Always have a repl backlog for master */
