@@ -1638,7 +1638,8 @@ int clusterProcessPacket(clusterLink *link) {
             clusterProcessGossipSection(hdr,link);
 
         /* Update the sender tag since it maybe changed via config set */
-        clusterSetNodeTag(sender, hdr->sendertag);
+        if (sender)
+            clusterSetNodeTag(sender, hdr->sendertag);
 
         /* Anyway reply with a PONG */
         clusterSendPing(link,CLUSTERMSG_TYPE_PONG);
