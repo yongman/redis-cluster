@@ -168,6 +168,11 @@ void loadServerConfigFromString(char *config) {
                     argv[1], strerror(errno));
                 exit(1);
             }
+        } else if (!strcasecmp(argv[0],"tag") && argc == 2) {
+            if (strlen(argv[1]) >= REDIS_TAG_STR_LEN) {
+                err = "Tag too long"; goto loaderr;
+            }
+            strncpy(server.tag, argv[1], REDIS_TAG_STR_LEN);
         } else if (!strcasecmp(argv[0],"loglevel") && argc == 2) {
             if (!strcasecmp(argv[1],"debug")) server.verbosity = REDIS_DEBUG;
             else if (!strcasecmp(argv[1],"verbose")) server.verbosity = REDIS_VERBOSE;
@@ -442,6 +447,13 @@ void loadServerConfigFromString(char *config) {
             if ((server.cluster_enabled = yesnotoi(argv[1])) == -1) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"cluster-autofailover") && argc == 2) {
+            int yn;
+
+            if ((yn= yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
+            server.cluster_autofailover = yn;
         } else if (!strcasecmp(argv[0],"cluster-config-file") && argc == 2) {
             zfree(server.cluster_configfile);
             server.cluster_configfile = zstrdup(argv[1]);
@@ -624,6 +636,7 @@ void loadServerConfig(char *filename, char *options) {
 void configSetCommand(redisClient *c) {
     robj *o;
     long long ll;
+    int err;
     redisAssertWithInfo(c,c->argv[2],sdsEncodedObject(c->argv[2]));
     redisAssertWithInfo(c,c->argv[3],sdsEncodedObject(c->argv[3]));
     o = c->argv[3];
@@ -643,8 +656,8 @@ void configSetCommand(redisClient *c) {
         zfree(server.masterauth);
         server.masterauth = ((char*)o->ptr)[0] ? zstrdup(o->ptr) : NULL;
     } else if (!strcasecmp(c->argv[2]->ptr,"maxmemory")) {
-        if (getLongLongFromObject(o,&ll) == REDIS_ERR ||
-            ll < 0) goto badfmt;
+        ll = memtoll(o->ptr,&err);
+        if (err || ll < 0) goto badfmt;
         server.maxmemory = ll;
         if (server.maxmemory) {
             if (server.maxmemory < zmalloc_used_memory()) {
@@ -666,7 +679,7 @@ void configSetCommand(redisClient *c) {
                 server.maxclients = orig_value;
                 return;
             }
-            if ((unsigned int) aeGetSetSize(server.el) <
+           if ((unsigned int) aeGetSetSize(server.el) <
                 server.maxclients + REDIS_EVENTLOOP_FDSET_INCR)
             {
                 if (aeResizeSetSize(server.el,
@@ -804,6 +817,15 @@ void configSetCommand(redisClient *c) {
             addReplyErrorFormat(c,"Changing directory: %s", strerror(errno));
             return;
         }
+    } else if (!strcasecmp(c->argv[2]->ptr,"tag")) {
+        if (strlen((char*)o->ptr) >= REDIS_TAG_STR_LEN) {
+            addReplyErrorFormat(c,"Tag name too long, max: %d", REDIS_TAG_STR_LEN-1);
+            return;
+        }
+        strncpy(server.tag,(char*)o->ptr,REDIS_TAG_STR_LEN);
+        if (server.cluster_enabled) {
+            clusterSetNodeTag(server.cluster->myself,server.tag);
+        }
     } else if (!strcasecmp(c->argv[2]->ptr,"hash-max-ziplist-entries")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll < 0) goto badfmt;
         server.hash_max_ziplist_entries = ll;
@@ -866,7 +888,6 @@ void configSetCommand(redisClient *c) {
          * whole configuration string or accept it all, even if a single
          * error in a single client class is present. */
         for (j = 0; j < vlen; j++) {
-            char *eptr;
             long val;
 
             if ((j % 4) == 0) {
@@ -875,8 +896,8 @@ void configSetCommand(redisClient *c) {
                     goto badfmt;
                 }
             } else {
-                val = strtoll(v[j], &eptr, 10);
-                if (eptr[0] != '\0' || val < 0) {
+                val = memtoll(v[j], &err);
+                if (err || val < 0) {
                     sdsfreesplitres(v,vlen);
                     goto badfmt;
                 }
@@ -910,7 +931,8 @@ void configSetCommand(redisClient *c) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0) goto badfmt;
         server.repl_timeout = ll;
     } else if (!strcasecmp(c->argv[2]->ptr,"repl-backlog-size")) {
-        if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0) goto badfmt;
+        ll = memtoll(o->ptr,&err);
+        if (err || ll < 0) goto badfmt;
         resizeReplicationBacklog(ll);
     } else if (!strcasecmp(c->argv[2]->ptr,"repl-backlog-ttl")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll < 0) goto badfmt;
@@ -1075,6 +1097,7 @@ void configGetCommand(redisClient *c) {
     config_get_string_field("unixsocket",server.unixsocket);
     config_get_string_field("logfile",server.logfile);
     config_get_string_field("pidfile",server.pidfile);
+    config_get_string_field("tag",server.tag);
 
     /* Numerical values */
     config_get_numerical_field("maxmemory",server.maxmemory);
@@ -1854,6 +1877,7 @@ int rewriteConfig(char *path) {
     rewriteConfigYesNoOption(state,"rdbcompression",server.rdb_compression,REDIS_DEFAULT_RDB_COMPRESSION);
     rewriteConfigYesNoOption(state,"rdbchecksum",server.rdb_checksum,REDIS_DEFAULT_RDB_CHECKSUM);
     rewriteConfigStringOption(state,"dbfilename",server.rdb_filename,REDIS_DEFAULT_RDB_FILENAME);
+    rewriteConfigStringOption(state,"tag",server.tag,NULL);
     rewriteConfigDirOption(state);
     rewriteConfigSlaveofOption(state);
     rewriteConfigStringOption(state,"masterauth",server.masterauth,NULL);
@@ -1893,6 +1917,7 @@ int rewriteConfig(char *path) {
     rewriteConfigBytesOption(state,"auto-aof-rewrite-min-size",server.aof_rewrite_min_size,REDIS_AOF_REWRITE_MIN_SIZE);
     rewriteConfigNumericalOption(state,"lua-time-limit",server.lua_time_limit,REDIS_LUA_TIME_LIMIT);
     rewriteConfigYesNoOption(state,"cluster-enabled",server.cluster_enabled,0);
+    rewriteConfigYesNoOption(state,"cluster-autofailover",server.cluster_autofailover,REDIS_DEFAULT_CLUSTER_AUTOFAILOVER);
     rewriteConfigStringOption(state,"cluster-config-file",server.cluster_configfile,REDIS_DEFAULT_CLUSTER_CONFIG_FILE);
     rewriteConfigYesNoOption(state,"cluster-require-full-coverage",server.cluster_require_full_coverage,REDIS_CLUSTER_DEFAULT_REQUIRE_FULL_COVERAGE);
     rewriteConfigNumericalOption(state,"cluster-node-timeout",server.cluster_node_timeout,REDIS_CLUSTER_DEFAULT_NODE_TIMEOUT);

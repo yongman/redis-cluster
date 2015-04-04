@@ -202,6 +202,7 @@ struct redisCommand redisCommandTable[] = {
     {"hincrbyfloat",hincrbyfloatCommand,4,"wmF",0,NULL,1,1,1,0,0},
     {"hdel",hdelCommand,-3,"wF",0,NULL,1,1,1,0,0},
     {"hlen",hlenCommand,2,"rF",0,NULL,1,1,1,0,0},
+    {"hstrlen",hstrlenCommand,3,"rF",0,NULL,1,1,1,0,0},
     {"hkeys",hkeysCommand,2,"rS",0,NULL,1,1,1,0,0},
     {"hvals",hvalsCommand,2,"rS",0,NULL,1,1,1,0,0},
     {"hgetall",hgetallCommand,2,"r",0,NULL,1,1,1,0,0},
@@ -1462,6 +1463,7 @@ void initServerConfig(void) {
     server.repl_min_slaves_to_write = REDIS_DEFAULT_MIN_SLAVES_TO_WRITE;
     server.repl_min_slaves_max_lag = REDIS_DEFAULT_MIN_SLAVES_MAX_LAG;
     server.cluster_enabled = 0;
+    server.cluster_autofailover = REDIS_DEFAULT_CLUSTER_AUTOFAILOVER;
     server.cluster_node_timeout = REDIS_CLUSTER_DEFAULT_NODE_TIMEOUT;
     server.cluster_migration_barrier = REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER;
     server.cluster_slave_validity_factor = REDIS_CLUSTER_DEFAULT_SLAVE_VALIDITY;
@@ -1530,6 +1532,7 @@ void initServerConfig(void) {
     server.lpushCommand = lookupCommandByCString("lpush");
     server.lpopCommand = lookupCommandByCString("lpop");
     server.rpopCommand = lookupCommandByCString("rpop");
+    server.sremCommand = lookupCommandByCString("srem");
 
     /* Slow log */
     server.slowlog_log_slower_than = REDIS_SLOWLOG_LOG_SLOWER_THAN;
@@ -2002,6 +2005,9 @@ struct redisCommand *lookupCommandOrOriginal(sds name) {
  * + REDIS_PROPAGATE_NONE (no propagation of command at all)
  * + REDIS_PROPAGATE_AOF (propagate into the AOF file if is enabled)
  * + REDIS_PROPAGATE_REPL (propagate into the replication link)
+ *
+ * This should not be used inside commands implementation. Use instead
+ * alsoPropagate(), preventCommandPropagation(), forceCommandPropagation().
  */
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                int flags)
@@ -2013,11 +2019,31 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 }
 
 /* Used inside commands to schedule the propagation of additional commands
- * after the current command is propagated to AOF / Replication. */
+ * after the current command is propagated to AOF / Replication.
+ *
+ * 'cmd' must be a pointer to the Redis command to replicate, dbid is the
+ * database ID the command should be propagated into.
+ * Arguments of the command to propagte are passed as an array of redis
+ * objects pointers of len 'argc', using the 'argv' vector.
+ *
+ * The function does not take a reference to the passed 'argv' vector,
+ * so it is up to the caller to release the passed argv (but it is usually
+ * stack allocated).  The function autoamtically increments ref count of
+ * passed objects, so the caller does not need to. */
 void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                    int target)
 {
-    redisOpArrayAppend(&server.also_propagate,cmd,dbid,argv,argc,target);
+    robj **argvcopy;
+    int j;
+
+    if (server.loading) return; /* No propagation during loading. */
+
+    argvcopy = zmalloc(sizeof(robj*)*argc);
+    for (j = 0; j < argc; j++) {
+        argvcopy[j] = argv[j];
+        incrRefCount(argv[j]);
+    }
+    redisOpArrayAppend(&server.also_propagate,cmd,dbid,argvcopy,argc,target);
 }
 
 /* It is possible to call the function forceCommandPropagation() inside a
@@ -2026,6 +2052,13 @@ void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 void forceCommandPropagation(redisClient *c, int flags) {
     if (flags & REDIS_PROPAGATE_REPL) c->flags |= REDIS_FORCE_REPL;
     if (flags & REDIS_PROPAGATE_AOF) c->flags |= REDIS_FORCE_AOF;
+}
+
+/* Avoid that the executed command is propagated at all. This way we
+ * are free to just propagate what we want using the alsoPropagate()
+ * API. */
+void preventCommandPropagation(redisClient *c) {
+    c->flags |= REDIS_PREVENT_PROP;
 }
 
 /* Call() is the core of Redis execution of a command */
@@ -2081,7 +2114,7 @@ void call(redisClient *c, int flags) {
     }
 
     /* Propagate the command into the AOF and replication link */
-    if (flags & REDIS_CALL_PROPAGATE) {
+    if (flags & REDIS_CALL_PROPAGATE && (c->flags & REDIS_PREVENT_PROP) == 0) {
         int flags = REDIS_PROPAGATE_NONE;
 
         if (c->flags & REDIS_FORCE_REPL) flags |= REDIS_PROPAGATE_REPL;
@@ -2092,20 +2125,24 @@ void call(redisClient *c, int flags) {
             propagate(c->cmd,c->db->id,c->argv,c->argc,flags);
     }
 
-    /* Restore the old FORCE_AOF/REPL flags, since call can be executed
+    /* Restore the old replication flags, since call can be executed
      * recursively. */
-    c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
-    c->flags |= client_old_flags & (REDIS_FORCE_AOF|REDIS_FORCE_REPL);
+    c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL|REDIS_PREVENT_PROP);
+    c->flags |= client_old_flags &
+        (REDIS_FORCE_AOF|REDIS_FORCE_REPL|REDIS_PREVENT_PROP);
 
     /* Handle the alsoPropagate() API to handle commands that want to propagate
-     * multiple separated commands. */
+     * multiple separated commands. Note that alsoPropagate() is not affected
+     * by REDIS_PREVENT_PROP flag. */
     if (server.also_propagate.numops) {
         int j;
         redisOp *rop;
 
-        for (j = 0; j < server.also_propagate.numops; j++) {
-            rop = &server.also_propagate.ops[j];
-            propagate(rop->cmd, rop->dbid, rop->argv, rop->argc, rop->target);
+        if (flags & REDIS_CALL_PROPAGATE) {
+            for (j = 0; j < server.also_propagate.numops; j++) {
+                rop = &server.also_propagate.ops[j];
+                propagate(rop->cmd,rop->dbid,rop->argv,rop->argc,rop->target);
+            }
         }
         redisOpArrayFree(&server.also_propagate);
     }
@@ -2659,7 +2696,8 @@ sds genRedisInfoString(char *section) {
             "uptime_in_days:%jd\r\n"
             "hz:%d\r\n"
             "lru_clock:%ld\r\n"
-            "config_file:%s\r\n",
+            "config_file:%s\r\n"
+            "tag:%s\r\n",
             REDIS_VERSION,
             redisGitSHA1(),
             strtol(redisGitDirty(),NULL,10) > 0,
@@ -2680,7 +2718,8 @@ sds genRedisInfoString(char *section) {
             (intmax_t)(uptime/(3600*24)),
             server.hz,
             (unsigned long) server.lruclock,
-            server.configfile ? server.configfile : "");
+            server.configfile ? server.configfile : "",
+            server.tag);
     }
 
     /* Clients */
@@ -2702,9 +2741,13 @@ sds genRedisInfoString(char *section) {
         char hmem[64];
         char peak_hmem[64];
         char total_system_hmem[64];
+        char used_memory_lua_hmem[64];
+        char used_memory_rss_hmem[64];
+        char maxmemory_hmem[64];
         size_t zmalloc_used = zmalloc_used_memory();
         size_t total_system_mem = server.system_memory_size;
         char *evict_policy = maxmemoryToString();
+        long long memory_lua = (long long)lua_gc(server.lua,LUA_GCCOUNT,0)*1024;
 
         /* Peak memory is updated from time to time by serverCron() so it
          * may happen that the instantaneous value is slightly bigger than
@@ -2716,6 +2759,9 @@ sds genRedisInfoString(char *section) {
         bytesToHuman(hmem,zmalloc_used);
         bytesToHuman(peak_hmem,server.stat_peak_memory);
         bytesToHuman(total_system_hmem,total_system_mem);
+        bytesToHuman(used_memory_lua_hmem,memory_lua);
+        bytesToHuman(used_memory_rss_hmem,server.resident_set_size);
+        bytesToHuman(maxmemory_hmem,server.maxmemory);
 
         if (sections++) info = sdscat(info,"\r\n");
         info = sdscatprintf(info,
@@ -2723,25 +2769,33 @@ sds genRedisInfoString(char *section) {
             "used_memory:%zu\r\n"
             "used_memory_human:%s\r\n"
             "used_memory_rss:%zu\r\n"
+            "used_memory_rss_human:%s\r\n"
             "used_memory_peak:%zu\r\n"
             "used_memory_peak_human:%s\r\n"
             "total_system_memory:%lu\r\n"
             "total_system_memory_human:%s\r\n"
             "used_memory_lua:%lld\r\n"
+            "used_memory_lua_human:%s\r\n"
+            "maxmemory:%lld\r\n"
+            "maxmemory_human:%s\r\n"
+            "maxmemory_policy:%s\r\n"
             "mem_fragmentation_ratio:%.2f\r\n"
-            "mem_allocator:%s\r\n"
-            "maxmemory_policy:%s\r\n",
+            "mem_allocator:%s\r\n",
             zmalloc_used,
             hmem,
             server.resident_set_size,
+            used_memory_rss_hmem,
             server.stat_peak_memory,
             peak_hmem,
             (unsigned long)total_system_mem,
             total_system_hmem,
-            ((long long)lua_gc(server.lua,LUA_GCCOUNT,0))*1024LL,
+            memory_lua,
+            used_memory_lua_hmem,
+            server.maxmemory,
+            maxmemory_hmem,
+            evict_policy,
             zmalloc_get_fragmentation_ratio(server.resident_set_size),
-            ZMALLOC_LIB,
-            evict_policy
+            ZMALLOC_LIB
             );
     }
 
@@ -3148,13 +3202,7 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
         samples = zmalloc(sizeof(samples[0])*server.maxmemory_samples);
     }
 
-#if 1 /* Use bulk get by default. */
-    count = dictGetRandomKeys(sampledict,samples,server.maxmemory_samples);
-#else
-    count = server.maxmemory_samples;
-    for (j = 0; j < count; j++) samples[j] = dictGetRandomKey(sampledict);
-#endif
-
+    count = dictGetSomeKeys(sampledict,samples,server.maxmemory_samples);
     for (j = 0; j < count; j++) {
         unsigned long long idle;
         sds key;
@@ -3209,7 +3257,7 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
 int freeMemoryIfNeeded(void) {
     size_t mem_used, mem_tofree, mem_freed;
     int slaves = listLength(server.slaves);
-    mstime_t latency;
+    mstime_t latency, eviction_latency;
 
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
@@ -3340,7 +3388,11 @@ int freeMemoryIfNeeded(void) {
                  * AOF and Output buffer memory will be freed eventually so
                  * we only care about memory used by the key space. */
                 delta = (long long) zmalloc_used_memory();
+                latencyStartMonitor(eviction_latency);
                 dbDelete(db,keyobj);
+                latencyEndMonitor(eviction_latency);
+                latencyAddSampleIfNeeded("eviction-del",eviction_latency);
+                latencyRemoveNestedEvent(latency,eviction_latency);
                 delta -= (long long) zmalloc_used_memory();
                 mem_freed += delta;
                 server.stat_evictedkeys++;
@@ -3551,17 +3603,6 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
-/* Returns 1 if there is --check-rdb among the arguments or if
- * argv[0] is exactly "redis-check-rdb". */
-int checkForCheckRDBMode(int argc, char **argv) {
-    int j;
-
-    if (strstr(argv[0],"redis-check-rdb") != NULL) return 1;
-    for (j = 1; j < argc; j++)
-        if (!strcmp(argv[j],"--check-rdb")) return 1;
-    return 0;
-}
-
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
     long long start = ustime();
@@ -3747,6 +3788,12 @@ int main(int argc, char **argv) {
         initSentinel();
     }
 
+    /* Check if we need to start in redis-check-rdb mode. We just execute
+     * the program main. However the program is part of the Redis executable
+     * so that we can easily execute an RDB check on loading errors. */
+    if (strstr(argv[0],"redis-check-rdb") != NULL)
+        exit(redis_check_rdb_main(argv,argc));
+
     if (argc >= 2) {
         int j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
@@ -3806,13 +3853,6 @@ int main(int argc, char **argv) {
         sdsfree(options);
     } else {
         redisLog(REDIS_WARNING, "Warning: no config file specified, using the default config. In order to specify a config file use %s /path/to/%s.conf", argv[0], server.sentinel_mode ? "sentinel" : "redis");
-    }
-
-    if (checkForCheckRDBMode(argc, argv)) {
-        redisLog(REDIS_WARNING, "Checking RDB file %s", server.rdb_filename);
-        redisLog(REDIS_WARNING, "To check different RDB file: "
-            "redis-check-rdb --dbfilename <dump.rdb>");
-        exit(redis_check_rdb(server.rdb_filename));
     }
 
     server.supervised = redisIsSupervised(server.supervised_mode);

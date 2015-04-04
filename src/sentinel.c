@@ -2741,6 +2741,12 @@ void sentinelCommand(redisClient *c) {
             != REDIS_OK) return;
         if (getLongFromObjectOrReply(c,c->argv[4],&port,"Invalid port")
             != REDIS_OK) return;
+
+        if (quorum <= 0) {
+            addReplyError(c, "Quorum must be 1 or greater.");
+            return;
+        }
+
         /* Make sure the IP field is actually a valid IP before passing it
          * to createSentinelRedisInstance(), otherwise we may trigger a
          * DNS lookup at runtime. */
@@ -2856,24 +2862,30 @@ numargserr:
 
 /* SENTINEL INFO [section] */
 void sentinelInfoCommand(redisClient *c) {
-    char *section = c->argc == 2 ? c->argv[1]->ptr : "default";
-    sds info = sdsempty();
-    int defsections = !strcasecmp(section,"default");
-    int sections = 0;
-
     if (c->argc > 2) {
         addReply(c,shared.syntaxerr);
         return;
     }
 
-    if (!strcasecmp(section,"server") || defsections) {
+    int defsections = 0, allsections = 0;
+    char *section = c->argc == 2 ? c->argv[1]->ptr : NULL;
+    if (section) {
+        allsections = !strcasecmp(section,"all");
+        defsections = !strcasecmp(section,"default");
+    } else {
+        defsections = 1;
+    }
+
+    int sections = 0;
+    sds info = sdsempty();
+    if (defsections || allsections || !strcasecmp(section,"server")) {
         if (sections++) info = sdscat(info,"\r\n");
         sds serversection = genRedisInfoString("server");
         info = sdscatlen(info,serversection,sdslen(serversection));
         sdsfree(serversection);
     }
 
-    if (!strcasecmp(section,"sentinel") || defsections) {
+    if (defsections || allsections || !strcasecmp(section,"sentinel")) {
         dictIterator *di;
         dictEntry *de;
         int master_id = 0;

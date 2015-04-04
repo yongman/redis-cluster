@@ -54,6 +54,11 @@ typedef struct clusterLink {
 #define REDIS_NODE_PROMOTED 256 /* Master was a slave promoted by failover */
 #define REDIS_NODE_NULL_NAME "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
+/* Cluster node mode */
+#define REDIS_NODE_READABLE 1
+#define REDIS_NODE_WRITABLE 2
+#define REDIS_NODE_INITIAL_MODE (REDIS_NODE_READABLE|REDIS_NODE_WRITABLE)
+
 #define nodeIsMaster(n) ((n)->flags & REDIS_NODE_MASTER)
 #define nodeIsSlave(n) ((n)->flags & REDIS_NODE_SLAVE)
 #define nodeInHandshake(n) ((n)->flags & REDIS_NODE_HANDSHAKE)
@@ -79,7 +84,11 @@ typedef struct clusterNodeFailReport {
 typedef struct clusterNode {
     mstime_t ctime; /* Node object creation time. */
     char name[REDIS_CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
+    char tag[REDIS_TAG_STR_LEN]; /* Node tag */
     int flags;      /* REDIS_NODE_... */
+    /* Mode is used by outside tools rather than cluster itself */
+    int mode;       /* Permissions (read,write) */
+    uint64_t modeVersion; /* Permission version for broadcasting update */
     uint64_t configEpoch; /* Last configEpoch observed for this node */
     unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node */
     int numslots;   /* Number of slots handled by this node */
@@ -166,8 +175,9 @@ typedef struct {
     char ip[REDIS_IP_STR_LEN];  /* IP address last time it was seen */
     uint16_t port;              /* port last time it was seen */
     uint16_t flags;             /* node->flags copy */
-    uint16_t notused1;          /* Some room for future improvements. */
-    uint32_t notused2;
+    uint16_t mode;              /* node->mode copy */
+    uint64_t modeVersion;       /* node->modeVersion copy */
+    uint32_t notused1;          /* for 64 bit alignment */
 } clusterMsgDataGossip;
 
 typedef struct {
@@ -228,11 +238,14 @@ typedef struct {
     uint64_t offset;    /* Master replication offset if node is a master or
                            processed replication offset if node is a slave. */
     char sender[REDIS_CLUSTER_NAMELEN]; /* Name of the sender node */
+    char sendertag[REDIS_TAG_STR_LEN];  /* Tag of the node */
     unsigned char myslots[REDIS_CLUSTER_SLOTS/8];
     char slaveof[REDIS_CLUSTER_NAMELEN];
     char notused1[32];  /* 32 bytes reserved for future usage. */
     uint16_t port;      /* Sender TCP base port */
     uint16_t flags;     /* Sender node flags */
+    uint16_t mode;      /* Sender mode flags */
+    uint64_t modeVersion;/* Sender mode flags version */
     unsigned char state; /* Cluster state from the POV of the sender */
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
     union clusterMsgData data;
@@ -248,5 +261,6 @@ typedef struct {
 
 /* ---------------------- API exported outside cluster.c -------------------- */
 clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *ask);
+void clusterSetNodeTag(clusterNode *node, const char *tag);
 
 #endif /* __REDIS_CLUSTER_H */

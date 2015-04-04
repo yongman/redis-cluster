@@ -101,6 +101,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_CACHED_MASTER_EXPIRE_MS (30*1000)
 #define REDIS_REPL_PING_SLAVE_PERIOD 10
 #define REDIS_RUN_ID_SIZE 40
+#define REDIS_TAG_STR_LEN 32
 #define REDIS_EOF_MARK_SIZE 40
 #define REDIS_DEFAULT_REPL_BACKLOG_SIZE (1024*1024)    /* 1mb */
 #define REDIS_DEFAULT_REPL_BACKLOG_TIME_LIMIT (60*60)  /* 1 hour */
@@ -137,6 +138,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_BINDADDR_MAX 16
 #define REDIS_MIN_RESERVED_FDS 32
 #define REDIS_DEFAULT_LATENCY_MONITOR_THRESHOLD 0
+#define REDIS_DEFAULT_CLUSTER_AUTOFAILOVER 0
 
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
 #define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
@@ -258,6 +260,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_PRE_PSYNC (1<<16)   /* Instance don't understand PSYNC. */
 #define REDIS_READONLY (1<<17)    /* Cluster client is in read-only state. */
 #define REDIS_PUBSUB (1<<18)      /* Client is in Pub/Sub mode. */
+#define REDIS_PREVENT_PROP (1<<19)  /* Don't propagate to AOF / Slaves. */
 
 /* Client block type (btype field in client structure)
  * if REDIS_BLOCKED flag is set. */
@@ -543,8 +546,8 @@ typedef struct redisClient {
     int multibulklen;       /* number of multi bulk arguments left to read */
     long bulklen;           /* length of bulk argument in multi bulk request */
     list *reply;
-    unsigned long reply_bytes; /* Tot bytes of objects in reply list */
-    int sentlen;            /* Amount of bytes already sent in the current
+    unsigned long long reply_bytes; /* Tot bytes of objects in reply list */
+    size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time */
     time_t lastinteraction; /* time of the last interaction, used for timeout */
@@ -554,8 +557,8 @@ typedef struct redisClient {
     int replstate;          /* replication state if this is a slave */
     int repl_put_online_on_ack; /* Install slave write handler on ACK. */
     int repldbfd;           /* replication DB file descriptor */
-    off_t repldboff;        /* replication DB file offset */
-    off_t repldbsize;       /* replication DB file size */
+    off_t repldboff;       /* replication DB file offset */
+    off_t repldbsize;      /* replication DB file size */
     sds replpreamble;       /* replication DB preamble. */
     long long reploff;      /* replication offset if this is our master */
     long long repl_ack_off; /* replication ack offset, if this is a slave */
@@ -679,6 +682,7 @@ struct redisServer {
     int arch_bits;              /* 32 or 64 depending on sizeof(long) */
     int cronloops;              /* Number of times the cron function run */
     char runid[REDIS_RUN_ID_SIZE+1];  /* ID always different at every exec. */
+    char tag[REDIS_TAG_STR_LEN];/* Redis tag */
     int sentinel_mode;          /* True if this instance is a Sentinel. */
     /* Networking */
     int port;                   /* TCP listening port */
@@ -709,7 +713,7 @@ struct redisServer {
     off_t loading_process_events_interval_bytes;
     /* Fast pointers to often looked up command */
     struct redisCommand *delCommand, *multiCommand, *lpushCommand, *lpopCommand,
-                        *rpopCommand;
+                        *rpopCommand, *sremCommand;
     /* Fields used only for stats */
     time_t stat_starttime;          /* Server start time */
     long long stat_numcommands;     /* Number of processed commands */
@@ -905,6 +909,7 @@ struct redisServer {
                                    xor of REDIS_NOTIFY... flags. */
     /* Cluster */
     int cluster_enabled;      /* Is cluster enabled? */
+    int cluster_autofailover; /* Is autofailover enabled? */
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
     struct clusterState *cluster;  /* State of the cluster */
@@ -1264,6 +1269,7 @@ void call(redisClient *c, int flags);
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int flags);
 void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int target);
 void forceCommandPropagation(redisClient *c, int flags);
+void preventCommandPropagation(redisClient *c);
 int prepareForShutdown();
 #ifdef __GNUC__
 void redisLog(int level, const char *fmt, ...)
@@ -1394,6 +1400,7 @@ void sentinelIsRunning(void);
 
 /* redis-check-rdb */
 int redis_check_rdb(char *rdbfilename);
+int redis_check_rdb_main(char **argv, int argc);
 
 /* Scripting */
 void scriptingInit(void);
@@ -1525,6 +1532,7 @@ void hmsetCommand(redisClient *c);
 void hmgetCommand(redisClient *c);
 void hdelCommand(redisClient *c);
 void hlenCommand(redisClient *c);
+void hstrlenCommand(redisClient *c);
 void zremrangebyrankCommand(redisClient *c);
 void zunionstoreCommand(redisClient *c);
 void zinterstoreCommand(redisClient *c);

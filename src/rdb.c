@@ -48,7 +48,7 @@
 
 void rdbCheckThenExit(char *reason, int where) {
     redisLog(REDIS_WARNING, "Corrupt RDB detected at rdb.c:%d (%s). "
-        "Running 'redis-check-rdb --dbfilename %s'",
+        "Running 'redis-check-rdb %s'",
         where, reason, server.rdb_filename);
     redis_check_rdb(server.rdb_filename);
     exit(1);
@@ -232,10 +232,10 @@ int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
     return rdbEncodeInteger(value,enc);
 }
 
-int rdbSaveLzfBlob(rio *rdb, void *data, size_t compress_len,
-                   size_t original_len) {
+ssize_t rdbSaveLzfBlob(rio *rdb, void *data, size_t compress_len,
+                       size_t original_len) {
     unsigned char byte;
-    int n, nwritten = 0;
+    ssize_t n, nwritten = 0;
 
     /* Data compressed! Let's save it on disk */
     byte = (REDIS_RDB_ENCVAL<<6)|REDIS_RDB_ENC_LZF;
@@ -257,7 +257,7 @@ writeerr:
     return -1;
 }
 
-int rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
+ssize_t rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
     size_t comprlen, outlen;
     void *out;
 
@@ -270,7 +270,7 @@ int rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
         zfree(out);
         return 0;
     }
-    size_t nwritten = rdbSaveLzfBlob(rdb, out, comprlen, len);
+    ssize_t nwritten = rdbSaveLzfBlob(rdb, out, comprlen, len);
     zfree(out);
     return nwritten;
 }
@@ -315,9 +315,9 @@ err:
 
 /* Save a string object as [len][data] on disk. If the object is a string
  * representation of an integer value we try to save it in a special form */
-int rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
+ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     int enclen;
-    int n, nwritten = 0;
+    ssize_t n, nwritten = 0;
 
     /* Try integer encoding */
     if (len <= 11) {
@@ -348,9 +348,9 @@ int rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
 }
 
 /* Save a long long value as either an encoded string or a string. */
-int rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
+ssize_t rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
     unsigned char buf[32];
-    int n, nwritten = 0;
+    ssize_t n, nwritten = 0;
     int enclen = rdbEncodeInteger(value,buf);
     if (enclen > 0) {
         return rdbWriteRaw(rdb,buf,enclen);
@@ -542,8 +542,8 @@ int rdbLoadObjectType(rio *rdb) {
 }
 
 /* Save a Redis object. Returns -1 on error, number of bytes written on success. */
-int rdbSaveObject(rio *rdb, robj *o) {
-    int n = 0, nwritten = 0;
+ssize_t rdbSaveObject(rio *rdb, robj *o) {
+    ssize_t n = 0, nwritten = 0;
 
     if (o->type == REDIS_STRING) {
         /* Save a string value */
@@ -664,8 +664,8 @@ int rdbSaveObject(rio *rdb, robj *o) {
  * the rdbSaveObject() function. Currently we use a trick to get
  * this length with very little changes to the code. In the future
  * we could switch to a faster solution. */
-off_t rdbSavedObjectLen(robj *o) {
-    int len = rdbSaveObject(NULL,o);
+size_t rdbSavedObjectLen(robj *o) {
+    ssize_t len = rdbSaveObject(NULL,o);
     redisAssertWithInfo(NULL,o,len != -1);
     return len;
 }
@@ -1375,7 +1375,7 @@ int rdbLoad(char *filename) {
             redisLog(REDIS_WARNING,"RDB file was saved with checksum disabled: no check performed.");
         } else if (cksum != expected) {
             redisLog(REDIS_WARNING,"Wrong RDB checksum. Aborting now.");
-            exit(1);
+            rdbExitReportCorruptRDB("RDB CRC error");
         }
     }
 
@@ -1385,7 +1385,7 @@ int rdbLoad(char *filename) {
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */
     redisLog(REDIS_WARNING,"Short read or OOM loading DB. Unrecoverable error, aborting now.");
-    exit(1);
+    rdbExitReportCorruptRDB("Unexpected EOF reading RDB file");
     return REDIS_ERR; /* Just to avoid warning */
 }
 
