@@ -88,7 +88,7 @@ typedef struct clusterNode {
     int flags;      /* REDIS_NODE_... */
     /* Mode is used by outside tools rather than cluster itself */
     int mode;       /* Permissions (read,write) */
-    uint64_t modeVersion; /* Permission version for broadcasting update */
+    uint64_t metaVersion; /* Meta version for broadcasting update */
     uint64_t configEpoch; /* Last configEpoch observed for this node */
     unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node */
     int numslots;   /* Number of slots handled by this node */
@@ -172,12 +172,12 @@ typedef struct {
     char nodename[REDIS_CLUSTER_NAMELEN];
     uint32_t ping_sent;
     uint32_t pong_received;
-    char ip[REDIS_IP_STR_LEN];  /* IP address last time it was seen */
-    uint16_t port;              /* port last time it was seen */
-    uint16_t flags;             /* node->flags copy */
-    uint16_t mode;              /* node->mode copy */
-    uint64_t modeVersion;       /* node->modeVersion copy */
-    uint32_t notused1;          /* for 64 bit alignment */
+    char ip[REDIS_IP_STR_LEN];       /* IP address last time it was seen */
+    uint16_t port;                   /* port last time it was seen */
+    uint16_t flags;                  /* node->flags copy */
+    char nodetag[REDIS_TAG_STR_LEN]; /* node->tag copy */
+    uint16_t mode;                   /* node->mode copy */
+    uint64_t metaVersion;            /* node->metaVersion copy */
 } clusterMsgDataGossip;
 
 typedef struct {
@@ -245,7 +245,7 @@ typedef struct {
     uint16_t port;      /* Sender TCP base port */
     uint16_t flags;     /* Sender node flags */
     uint16_t mode;      /* Sender mode flags */
-    uint64_t modeVersion;/* Sender mode flags version */
+    uint64_t metaVersion;/* Sender meta version */
     unsigned char state; /* Cluster state from the POV of the sender */
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
     union clusterMsgData data;

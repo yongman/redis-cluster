@@ -670,7 +670,7 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->configEpoch = 0;
     node->flags = flags;
     node->mode = REDIS_NODE_INITIAL_MODE;
-    node->modeVersion = 0;
+    node->metaVersion = 0;
     memset(node->slots,0,sizeof(node->slots));
     node->numslots = 0;
     node->numslaves = 0;
@@ -1174,14 +1174,31 @@ int clusterStartHandshake(char *ip, int port) {
     return 1;
 }
 
-void nodeUpdateMode(clusterNode *node, uint16_t mode, uint64_t modeVersion) {
-    if (modeVersion > node->modeVersion) {
+void nodeUpdateMode(clusterNode *node, uint16_t mode, uint64_t metaVersion) {
+    if (metaVersion > node->metaVersion) {
         node->mode = mode;
-        node->modeVersion = modeVersion;
-        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);   
-    } else if (modeVersion == node->modeVersion && mode != node->mode) {
-        /* Handle confliction, just random increase modeVersion for the next merging */
-        node->modeVersion += random() % 3;
+        node->metaVersion = metaVersion;
+        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
+    } else if (metaVersion == node->metaVersion && mode != node->mode) {
+        /* Handle confliction, just random increase metaVersion for the next merging */
+        node->metaVersion += random() % 5;
+    }
+}
+
+void nodeUpdateTag(clusterNode *node, char *tag, uint64_t metaVersion) {
+    if (strnlen(tag, REDIS_TAG_STR_LEN) == 0) {
+        return;
+    }
+    if (metaVersion > node->metaVersion || strnlen(node->tag, REDIS_TAG_STR_LEN) == 0) {
+        redisLog(REDIS_NOTICE, "Update tag of %.40s from '%.32s' to '%.32s'", 
+                 node->name, node->tag, tag);
+        clusterSetNodeTag(node, tag);
+        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
+    } else if (metaVersion == node->metaVersion && 
+               strncmp(node->tag,tag,REDIS_TAG_STR_LEN) != 0) {
+        /* Handle confliction, just random increase metaVersion for the next merging */
+        redisLog(REDIS_NOTICE, "Random incr mode version of %.40s ('%.32s' -> '%.32s')", node->name, node->tag, tag);
+        node->metaVersion += random() % 5;
     }
 }
 
@@ -1197,7 +1214,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
     while(count--) {
         uint16_t flags = ntohs(g->flags);
         uint16_t mode = ntohs(g->mode);
-        uint64_t modeVersion = ntohu64(g->modeVersion);
+        uint64_t metaVersion = ntohu64(g->metaVersion);
         clusterNode *node;
         sds ci;
 
@@ -1230,8 +1247,11 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                     }
                 }
             }
-            /* Update node mode if modeVersion changed */
-            nodeUpdateMode(node, mode, modeVersion);
+            /* Update node mode if metaVersion changed */
+            nodeUpdateMode(node, mode, metaVersion);
+            /* Update node tag if needed */
+            if (node != myself)
+                nodeUpdateTag(node, g->nodetag, metaVersion);
             /* If we already know this node, but it is not reachable, and
              * we see a different address in the gossip section, start an
              * handshake with the (possibly) new address: this will result
@@ -1487,6 +1507,9 @@ void clusterHandleConfigEpochCollision(clusterNode *sender) {
 }
 
 void clusterSetNodeTag(clusterNode *node, const char *tag) {
+    if (node == myself)
+        node->metaVersion++;
+    memset(node->tag, 0, REDIS_TAG_STR_LEN);
     strncpy(node->tag, tag, REDIS_TAG_STR_LEN);
 }
 
@@ -1505,7 +1528,7 @@ int clusterProcessPacket(clusterLink *link) {
     uint16_t type = ntohs(hdr->type);
     uint16_t flags = ntohs(hdr->flags);
     uint16_t mode = ntohs(hdr->mode);
-    uint64_t modeVersion = ntohu64(hdr->modeVersion);
+    uint64_t metaVersion = ntohu64(hdr->metaVersion);
     uint64_t senderCurrentEpoch = 0, senderConfigEpoch = 0;
     clusterNode *sender;
 
@@ -1572,7 +1595,7 @@ int clusterProcessPacket(clusterLink *link) {
         sender->repl_offset = ntohu64(hdr->offset);
         sender->repl_offset_time = mstime();
         /* Update mode of sender if changed */
-        nodeUpdateMode(sender, mode, modeVersion);
+        nodeUpdateMode(sender, mode, metaVersion);
         /* If we are a slave performing a manual failover and our master
          * sent its offset while already paused, populate the MF state. */
         if (server.cluster->mf_end &&
@@ -1755,7 +1778,7 @@ int clusterProcessPacket(clusterLink *link) {
                  * looking -- It is '-r' for slave instead of 'rw'. */
                 if (sender->mode & REDIS_NODE_WRITABLE) {
                     sender->mode &= ~REDIS_NODE_WRITABLE;
-                    sender->modeVersion++;
+                    sender->metaVersion++;
                 }
 
                 /* Master node changed for this slave? */
@@ -2115,7 +2138,7 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     hdr->flags = htons(myself->flags);
     hdr->state = server.cluster->state;
     hdr->mode = htons(myself->mode);
-    hdr->modeVersion = htonu64(myself->modeVersion);
+    hdr->metaVersion = htonu64(myself->metaVersion);
 
     /* Set the currentEpoch and configEpochs. */
     hdr->currentEpoch = htonu64(server.cluster->currentEpoch);
@@ -2251,8 +2274,8 @@ void clusterSendPing(clusterLink *link, int type) {
         gossip->port = htons(this->port);
         gossip->flags = htons(this->flags);
         gossip->mode = htons(this->mode);
-        gossip->modeVersion = htonu64(this->modeVersion);
-        gossip->notused1 = 0;
+        gossip->metaVersion = htonu64(this->metaVersion);
+        memcpy(gossip->nodetag,this->tag,REDIS_TAG_STR_LEN);
         gossipcount++;
     }
 
@@ -4066,7 +4089,7 @@ void clusterCommand(redisClient *c) {
         } else if (!strcasecmp(mode,"-r")) {
             n->mode &= ~REDIS_NODE_READABLE;
         }
-        n->modeVersion++;
+        n->metaVersion++;
 
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
         addReply(c,shared.ok);
