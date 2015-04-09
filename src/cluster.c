@@ -3714,6 +3714,10 @@ sds clusterGenNodesDescription(int filter, int extra) {
     dictIterator *di;
     dictEntry *de;
 
+    if (extra) {
+        ni = genRedisInfoSummaryString();
+        ci = sdscatsds(ci,ni);
+    }
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);

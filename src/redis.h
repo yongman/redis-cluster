@@ -1052,6 +1052,7 @@ uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
 void exitFromChild(int retcode);
 size_t redisPopcount(void *s, long count);
 void redisSetProcTitle(char *title);
+long long getInstantaneousMetric(int metric);
 
 /* networking.c -- Networking and Client related operations */
 redisClient *createClient(int fd);
@@ -1593,6 +1594,7 @@ void bugReportStart(void);
 void redisLogObjectDebugInfo(robj *o);
 void sigsegvHandler(int sig, siginfo_t *info, void *secret);
 sds genRedisInfoString(char *section);
+sds genRedisInfoSummaryString();
 void enableWatchdog(int period);
 void disableWatchdog(void);
 void watchdogScheduleSignal(int period);
