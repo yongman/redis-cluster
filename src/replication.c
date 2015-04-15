@@ -2194,22 +2194,6 @@ void replicationCron(void) {
         }
     }
 
-    /* If we have no attached slaves and there is a replication backlog
-     * using memory, free it after some (configured) time. */
-    if (listLength(server.slaves) == 0 && server.repl_backlog_time_limit &&
-        server.repl_backlog)
-    {
-        time_t idle = server.unixtime - server.repl_no_slaves_since;
-
-        if (idle > server.repl_backlog_time_limit) {
-            freeReplicationBacklog();
-            redisLog(REDIS_NOTICE,
-                "Replication backlog freed after %d seconds "
-                "without connected slaves.",
-                (int) server.repl_backlog_time_limit);
-        }
-    }
-
     /* If AOF is disabled and we no longer have attached slaves, we can
      * free our Replication Script Cache as there is no need to propagate
      * EVALSHA at all. */
