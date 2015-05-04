@@ -166,6 +166,11 @@ void loadServerConfigFromString(char *config) {
                     argv[1], strerror(errno));
                 exit(1);
             }
+        } else if (!strcasecmp(argv[0],"tag") && argc == 2) {
+            if (strlen(argv[1]) >= REDIS_TAG_STR_LEN) {
+                err = "Tag too long"; goto loaderr;
+            }
+            strncpy(server.tag, argv[1], REDIS_TAG_STR_LEN);
         } else if (!strcasecmp(argv[0],"loglevel") && argc == 2) {
             if (!strcasecmp(argv[1],"debug")) server.verbosity = REDIS_DEBUG;
             else if (!strcasecmp(argv[1],"verbose")) server.verbosity = REDIS_VERBOSE;
@@ -794,6 +799,15 @@ void configSetCommand(redisClient *c) {
         if (chdir((char*)o->ptr) == -1) {
             addReplyErrorFormat(c,"Changing directory: %s", strerror(errno));
             return;
+        }
+    } else if (!strcasecmp(c->argv[2]->ptr,"tag")) {
+        if (strlen((char*)o->ptr) >= REDIS_TAG_STR_LEN) {
+            addReplyErrorFormat(c,"Tag name too long, max: %d", REDIS_TAG_STR_LEN-1);
+            return;
+        }
+        strncpy(server.tag,(char*)o->ptr,REDIS_TAG_STR_LEN);
+        if (server.cluster_enabled) {
+            clusterSetNodeTag(server.cluster->myself,server.tag);
         }
     } else if (!strcasecmp(c->argv[2]->ptr,"hash-max-ziplist-entries")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll < 0) goto badfmt;
