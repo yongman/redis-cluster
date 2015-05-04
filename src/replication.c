@@ -38,7 +38,7 @@
 #include <sys/stat.h>
 
 void replicationDiscardCachedMaster(void);
-void replicationResurrectCachedMaster(int newfd);
+void replicationResurrectCachedMaster(int newfd, const char *runid);
 void replicationSendAck(void);
 void putSlaveOnline(redisClient *slave);
 
@@ -300,54 +300,79 @@ void replicationFeedMonitors(redisClient *c, list *monitors, int dictid, robj **
 
 /* Feed the slave 'c' with the replication backlog starting from the
  * specified 'offset' up to the end of the backlog. */
-long long addReplyReplicationBacklog(redisClient *c, long long offset) {
+long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) {
     long long j, skip, len;
+    char *backlog;
+    long long backlog_size;
+    long long backlog_off;
+    long long backlog_histlen;
+    long long backlog_idx;
 
+    if (rvs) {
+        backlog = server.rvs_backlog;
+        backlog_off = server.rvs_backlog_off;
+        backlog_histlen = server.rvs_backlog_histlen;
+        backlog_idx = server.rvs_backlog_idx;
+    } else {
+        backlog = server.repl_backlog;
+        backlog_off = server.repl_backlog_off;
+        backlog_histlen = server.repl_backlog_histlen;
+        backlog_idx = server.repl_backlog_idx;
+    }
+    backlog_size = server.repl_backlog_size;
+
+    redisLog(REDIS_NOTICE, "[PSYNC] RVS backlog: %d", rvs);
     redisLog(REDIS_DEBUG, "[PSYNC] Slave request offset: %lld", offset);
 
-    if (server.repl_backlog_histlen == 0) {
+    if (backlog_histlen == 0) {
         redisLog(REDIS_DEBUG, "[PSYNC] Backlog history len is zero");
         return 0;
     }
 
-    redisLog(REDIS_DEBUG, "[PSYNC] Backlog size: %lld",
-             server.repl_backlog_size);
-    redisLog(REDIS_DEBUG, "[PSYNC] First byte: %lld",
-             server.repl_backlog_off);
-    redisLog(REDIS_DEBUG, "[PSYNC] History len: %lld",
-             server.repl_backlog_histlen);
-    redisLog(REDIS_DEBUG, "[PSYNC] Current index: %lld",
-             server.repl_backlog_idx);
+    redisLog(REDIS_DEBUG, "[PSYNC] Backlog size: %lld", backlog_size);
+    redisLog(REDIS_DEBUG, "[PSYNC] First byte: %lld", backlog_off);
+    redisLog(REDIS_DEBUG, "[PSYNC] History len: %lld", backlog_histlen);
+    redisLog(REDIS_DEBUG, "[PSYNC] Current index: %lld", backlog_idx);
 
     /* Compute the amount of bytes we need to discard. */
-    skip = offset - server.repl_backlog_off;
+    skip = offset - backlog_off;
     redisLog(REDIS_DEBUG, "[PSYNC] Skipping: %lld", skip);
 
     /* Point j to the oldest byte, that is actaully our
      * server.repl_backlog_off byte. */
-    j = (server.repl_backlog_idx +
-        (server.repl_backlog_size-server.repl_backlog_histlen)) %
-        server.repl_backlog_size;
+    j = (backlog_idx + (backlog_size-backlog_histlen)) % backlog_size;
     redisLog(REDIS_DEBUG, "[PSYNC] Index of first byte: %lld", j);
 
     /* Discard the amount of data to seek to the specified 'offset'. */
-    j = (j + skip) % server.repl_backlog_size;
+    j = (j + skip) % backlog_size;
 
     /* Feed slave with data. Since it is a circular buffer we have to
      * split the reply in two parts if we are cross-boundary. */
-    len = server.repl_backlog_histlen - skip;
+    len = backlog_histlen - skip;
     redisLog(REDIS_DEBUG, "[PSYNC] Reply total length: %lld", len);
     while(len) {
-        long long thislen =
-            ((server.repl_backlog_size - j) < len) ?
-            (server.repl_backlog_size - j) : len;
+        long long thislen = ((backlog_size - j) < len) ? (backlog_size - j) : len;
 
         redisLog(REDIS_DEBUG, "[PSYNC] addReply() length: %lld", thislen);
-        addReplySds(c,sdsnewlen(server.repl_backlog + j, thislen));
+        addReplySds(c,sdsnewlen(backlog + j, thislen));
         len -= thislen;
         j = 0;
     }
-    return server.repl_backlog_histlen - skip;
+    return backlog_histlen - skip;
+}
+
+static redisClient* slaveWithReplState(int state) {
+    redisClient *slave = NULL;
+    listNode *ln;
+    listIter li;
+
+    listRewind(server.slaves,&li);
+    while((ln = listNext(&li))) {
+        slave = ln->value;
+        if (slave->replstate == state) break;
+    }
+
+    return slave;
 }
 
 /* Return the offset to provide as reply to the PSYNC command received
@@ -409,42 +434,69 @@ int masterTryPartialResynchronization(redisClient *c) {
     char *master_runid = c->argv[1]->ptr;
     char buf[128];
     int buflen;
+    int rvs = 0;
+
+    if (getLongLongFromObjectOrReply(c,c->argv[2],&psync_offset,NULL) !=
+        REDIS_OK) goto need_full_resync;
 
     /* Is the runid of this master the same advertised by the wannabe slave
      * via PSYNC? If runid changed this master is a different instance and
      * there is no way to continue. */
     if (strcasecmp(master_runid, server.runid)) {
         /* Run id "?" is used by slaves that want to force a full resync. */
-        if (master_runid[0] != '?') {
-            redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: "
-                "Runid mismatch (Client asked for runid '%s', my runid is '%s')",
-                master_runid, server.runid);
-        } else {
+        if (master_runid[0] == '?') {
             redisLog(REDIS_NOTICE,"Full resync requested by slave %s",
                 replicationGetSlaveName(c));
+            goto need_full_resync;
+        } else if (server.masterhost == NULL && server.cached_master) {
+            /* Try psync with same source */
+            if (strcasecmp(master_runid, server.cached_master->replrunid)) {
+                redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: Runid mismatch "
+                         "(Client asked for runid '%s', my runid is '%s', my cached_master runid is '%s').",
+                         master_runid, server.runid, server.cached_master->replrunid);
+                goto need_full_resync;
+            }
+            if (psync_offset > server.unset_master_reploff+1) {
+                redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: Lack of backlog"
+                         "(Slave request psync_offset was '%lld', my unset_master_reploff is '%lld').",
+                         psync_offset, server.unset_master_reploff);
+                goto need_full_resync;
+            }
+            if (psync_offset < server.repl_master_initial_offset) {
+                redisLog(REDIS_NOTICE,"Partial resynchronization not accepted Lack of backlog"
+                         "(Slave request psync_offset was '%lld', repl_master_inital_offset is %lld).",
+                         psync_offset, server.repl_master_initial_offset);
+                goto need_full_resync;
+            }
+            rvs = 1;
+            redisLog(REDIS_NOTICE, "Will do partial resynchronization for sibling node.");
+        } else {
+            redisLog(REDIS_NOTICE,"Partial resynchronization not accepted: "
+                     "Runid mismatch and no cached master (Client asked for runid '%s', my runid is '%s').",
+                     master_runid, server.runid);
+            goto need_full_resync;
         }
-        goto need_full_resync;
     }
 
-    /* We still have the data our slave is asking for? */
-    if (getLongLongFromObjectOrReply(c,c->argv[2],&psync_offset,NULL) !=
-       REDIS_OK) goto need_full_resync;
-    if (!server.repl_backlog ||
-        psync_offset < server.repl_backlog_off ||
-        psync_offset > (server.repl_backlog_off + server.repl_backlog_histlen))
-    {
-        redisLog(REDIS_NOTICE,
-            "Unable to partial resync with slave %s for lack of backlog (Slave request was: %lld).", replicationGetSlaveName(c), psync_offset);
-        if (psync_offset > server.master_repl_offset) {
-            redisLog(REDIS_WARNING,
-                "Warning: slave %s tried to PSYNC with an offset that is greater than the master replication offset.", replicationGetSlaveName(c));
+    if (!rvs) {
+        /* We still have the data our slave is asking for? */
+        if (!server.repl_backlog ||
+            psync_offset < server.repl_backlog_off ||
+            psync_offset > (server.repl_backlog_off + server.repl_backlog_histlen))
+        {
+            redisLog(REDIS_NOTICE,
+                     "Unable to partial resync with slave %s for lack of backlog (Slave request was: %lld).", replicationGetSlaveName(c), psync_offset);
+            if (psync_offset > server.master_repl_offset) {
+                redisLog(REDIS_WARNING,
+                         "Warning: slave %s tried to PSYNC with an offset that is greater than the master replication offset.", replicationGetSlaveName(c));
+            }
+            goto need_full_resync;
         }
-        goto need_full_resync;
     }
 
     /* If we reached this point, we are able to perform a partial resync:
      * 1) Set client state to make it a slave.
-     * 2) Inform the client we can continue with +CONTINUE
+     * 2) Inform the client we can continue with +CONTINUE <runid>.
      * 3) Send the backlog data (from the offset to the end) to the slave. */
     c->flags |= REDIS_SLAVE;
     c->replstate = REDIS_REPL_ONLINE;
@@ -454,12 +506,20 @@ int masterTryPartialResynchronization(redisClient *c) {
     /* We can't use the connection buffers since they are used to accumulate
      * new commands at this stage. But we are sure the socket send buffer is
      * empty so this write will never fail actually. */
-    buflen = snprintf(buf,sizeof(buf),"+CONTINUE\r\n");
+    buflen = snprintf(buf,sizeof(buf),"+CONTINUE %s\r\n",server.runid);
     if (write(c->fd,buf,buflen) != buflen) {
         freeClientAsync(c);
         return REDIS_OK;
     }
-    psync_len = addReplyReplicationBacklog(c,psync_offset);
+    /* Send RVS backlog firstly */
+    if (rvs) {
+        psync_len = addReplyReplicationBacklog(c,psync_offset,1);
+        psync_offset += psync_len;
+        /* Add one byte to align master_repl_off since when the backlog created,
+         * we add one to avoid wrong psync. */
+        psync_offset++;
+    }
+    psync_len = addReplyReplicationBacklog(c,psync_offset,0);
     redisLog(REDIS_NOTICE,
         "Partial resynchronization request from %s accepted. Sending %lld bytes of backlog starting from offset %lld.",
             replicationGetSlaveName(c),
@@ -837,6 +897,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                  * is technically online now. */
                 slave->replstate = REDIS_REPL_ONLINE;
                 slave->repl_put_online_on_ack = 1;
+                server.fullsync_repl_offset = -1;
                 slave->repl_ack_time = server.unixtime; /* Timeout otherwise. */
             } else {
                 if (bgsaveerr != REDIS_OK) {
@@ -855,6 +916,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                 slave->replstate = REDIS_REPL_SEND_BULK;
                 slave->replpreamble = sdscatprintf(sdsempty(),"$%lld\r\n",
                     (unsigned long long) slave->repldbsize);
+                server.fullsync_repl_offset = -1;
 
                 aeDeleteFileEvent(server.el,slave->fd,AE_WRITABLE);
                 if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE, sendBulkToSlave, slave) == AE_ERR) {
@@ -1307,10 +1369,23 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
 
     if (!strncmp(reply,"+CONTINUE",9)) {
         /* Partial resync was accepted, set the replication state accordingly */
+        char *runid = NULL;
+
+        runid = strchr(reply,' ');
+        if (runid) {
+            runid++;
+        }
         redisLog(REDIS_NOTICE,
-            "Successful partial resynchronization with master.");
+                 "Successful partial resynchronization with master %40s.",
+                 runid);
         sdsfree(reply);
-        replicationResurrectCachedMaster(fd);
+        /* If this is a psync via siblings, force our slaves to resync with us since
+         * we will modify the reploff of our master link. */
+        if (strncmp(server.cached_master->replrunid,runid,REDIS_RUN_ID_SIZE)) {
+            disconnectSlaves();
+            freeReplicationBacklog();
+        }
+        replicationResurrectCachedMaster(fd,runid);
         return PSYNC_CONTINUE;
     }
 
@@ -1328,7 +1403,6 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
             "error state (reply: %s)", reply);
     }
     sdsfree(reply);
-    replicationDiscardCachedMaster();
     return PSYNC_NOT_SUPPORTED;
 }
 
@@ -1620,20 +1694,67 @@ int cancelReplicationHandshake(void) {
     return 1;
 }
 
+void createRvsBacklog(void) {
+    redisLog(REDIS_NOTICE,"Create RVS backlog.");
+    server.rvs_backlog = zmalloc(server.repl_backlog_size);
+    server.rvs_backlog_histlen = 0;
+    server.rvs_backlog_idx = 0;
+    server.rvs_fregment_len = 0;
+    if (server.master)
+        server.rvs_backlog_off = server.master->reploff;
+}
+
+void freeRvsBacklog(void) {
+    if (server.rvs_backlog == NULL) return;
+    redisLog(REDIS_NOTICE,"Free RVS backlog.");
+    zfree(server.rvs_backlog);
+    server.rvs_backlog = NULL;
+    server.rvs_backlog_histlen = 0;
+    server.rvs_backlog_idx = 0;
+    server.rvs_fregment_len = 0;
+}
+
+void replicationFeedRvsBacklog(void *ptr, size_t len) {
+    unsigned char *p = ptr;
+
+    while(len) {
+        size_t thislen = server.repl_backlog_size - server.rvs_backlog_idx;
+        if (thislen > len) thislen = len;
+        memcpy(server.rvs_backlog+server.rvs_backlog_idx,p,thislen);
+        server.rvs_backlog_idx += thislen;
+        if (server.rvs_backlog_idx == server.repl_backlog_size)
+            server.rvs_backlog_idx = 0;
+        len -= thislen;
+        p += thislen;
+        server.rvs_backlog_histlen += thislen;
+    }
+    if (server.rvs_backlog_histlen > server.repl_backlog_size)
+        server.rvs_backlog_histlen = server.repl_backlog_size;
+    /* Set the offset of the first byte we have in the backlog. */
+    server.rvs_backlog_off = server.master->reploff -
+                             server.rvs_backlog_histlen + 1;
+}
+
 /* Set replication to the specified master address and port. */
 void replicationSetMaster(char *ip, int port) {
+    if (server.masterhost == NULL) {
+        /* If we were a master, never psync with anybody. */
+        replicationDiscardCachedMaster();
+    }
     sdsfree(server.masterhost);
     server.masterhost = sdsnew(ip);
     server.masterport = port;
-    if (server.master) freeClient(server.master);
-    disconnectAllBlockedClients(); /* Clients blocked in master, now slave. */
+    if (server.master) {
+        /* If we were a slave, don't dicard cached master immediately
+         * so that we still have the opportunity to do psync with our
+         * siblings. */
+        freeClient(server.master);
+    }
     disconnectSlaves(); /* Force our slaves to resync with us as well. */
-    replicationDiscardCachedMaster(); /* Don't try a PSYNC. */
     freeReplicationBacklog(); /* Don't allow our chained slaves to PSYNC. */
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_CONNECT;
     server.master_repl_offset = 0;
-    server.repl_down_since = 0;
 }
 
 /* Cancel replication, setting the instance as a master itself. */
@@ -1648,11 +1769,29 @@ void replicationUnsetMaster(void) {
              * Under certain conditions this makes replicas comparable by
              * replication offset to understand what is the most updated. */
             server.master_repl_offset = server.master->reploff;
+            server.unset_master_reploff = server.master->reploff;
             freeReplicationBacklog();
         }
         freeClient(server.master);
     }
-    replicationDiscardCachedMaster();
+    /* We need trim the fregment (incomplete) command in the end of 
+     * RVS backlog, otherwise it will cause incorrect command 
+     * sending to the slaves. */
+    if (server.rvs_backlog) {
+        server.rvs_backlog_histlen -= server.rvs_fregment_len;
+        server.unset_master_reploff -= server.rvs_fregment_len;
+    }
+    /* Don't do psync for our siblings if we have chained slaves */
+    if (listLength(server.slaves) > 0) {
+        replicationDiscardCachedMaster();
+    } else {
+        server.master_repl_offset = server.unset_master_reploff;
+        server.unset_master_ustime = ustime();
+    }
+    /* Always have a repl backlog for master */
+    if (server.repl_backlog == NULL) {
+        createReplicationBacklog();
+    }
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_NONE;
 }
@@ -1819,6 +1958,9 @@ void replicationCacheMaster(redisClient *c) {
         c->peerid = NULL;
     }
 
+    /* Cache offset when master gone. */
+    server.unset_master_reploff = server.master->reploff;
+
     /* Caching the master happens instead of the actual freeClient() call,
      * so make sure to adjust the replication state. This function will
      * also set server.master to NULL. */
@@ -1842,7 +1984,7 @@ void replicationDiscardCachedMaster(void) {
  * This function is called when successfully setup a partial resynchronization
  * so the stream of data that we'll receive will start from were this
  * master left. */
-void replicationResurrectCachedMaster(int newfd) {
+void replicationResurrectCachedMaster(int newfd, const char *runid) {
     server.master = server.cached_master;
     server.cached_master = NULL;
     server.master->fd = newfd;
@@ -1850,6 +1992,16 @@ void replicationResurrectCachedMaster(int newfd) {
     server.master->authenticated = 1;
     server.master->lastinteraction = server.unixtime;
     server.repl_state = REDIS_REPL_CONNECTED;
+
+    /* It is RVS psync, fix the '+1' caused by createReplicationBacklog() */
+    if (strncmp(server.master->replrunid,runid,REDIS_RUN_ID_SIZE)) {
+        server.master->reploff++;
+        /* Reset master runid */
+        memcpy(server.master->replrunid,runid,REDIS_RUN_ID_SIZE);
+        memcpy(server.repl_master_runid,runid,REDIS_RUN_ID_SIZE);
+        redisLog(REDIS_NOTICE,"Reparent master to %.*s with reploff %lld",
+                 REDIS_RUN_ID_SIZE,server.repl_master_runid,server.master->reploff);
+    }
 
     /* Re-add to the list of clients. */
     listAddNodeTail(server.clients,server.master);
@@ -2165,6 +2317,8 @@ void replicationCron(void) {
             server.masterhost, server.masterport);
         if (connectWithMaster() == REDIS_OK) {
             redisLog(REDIS_NOTICE,"MASTER <-> SLAVE sync started");
+            /* Create RVS backlog buffer when we became a master */
+            if (server.rvs_backlog == NULL) createRvsBacklog();
         }
     }
 
@@ -2231,22 +2385,6 @@ void replicationCron(void) {
         }
     }
 
-    /* If we have no attached slaves and there is a replication backlog
-     * using memory, free it after some (configured) time. */
-    if (listLength(server.slaves) == 0 && server.repl_backlog_time_limit &&
-        server.repl_backlog)
-    {
-        time_t idle = server.unixtime - server.repl_no_slaves_since;
-
-        if (idle > server.repl_backlog_time_limit) {
-            freeReplicationBacklog();
-            redisLog(REDIS_NOTICE,
-                "Replication backlog freed after %d seconds "
-                "without connected slaves.",
-                (int) server.repl_backlog_time_limit);
-        }
-    }
-
     /* If AOF is disabled and we no longer have attached slaves, we can
      * free our Replication Script Cache as there is no need to propagate
      * EVALSHA at all. */
@@ -2301,6 +2439,16 @@ void replicationCron(void) {
                     }
                 }
             }
+        }
+    }
+
+    /* Discard the cached_master if we have became new master for a long time */
+    if (server.masterhost == NULL && server.cached_master != NULL) {
+        long long now = ustime();
+        if ((now - server.unset_master_ustime)/1000 > REDIS_CACHED_MASTER_EXPIRE_MS) {
+            redisLog(REDIS_NOTICE, "Cached master expired.");
+            replicationDiscardCachedMaster();
+            freeRvsBacklog();
         }
     }
 
