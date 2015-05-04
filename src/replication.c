@@ -321,26 +321,26 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     backlog_size = server.repl_backlog_size;
 
     redisLog(REDIS_NOTICE, "[PSYNC] RVS backlog: %d", rvs);
-    redisLog(REDIS_DEBUG, "[PSYNC] Slave request offset: %lld", offset);
+    redisLog(REDIS_NOTICE, "[PSYNC] Slave request offset: %lld", offset);
 
     if (backlog_histlen == 0) {
-        redisLog(REDIS_DEBUG, "[PSYNC] Backlog history len is zero");
+        redisLog(REDIS_NOTICE, "[PSYNC] Backlog history len is zero");
         return 0;
     }
 
-    redisLog(REDIS_DEBUG, "[PSYNC] Backlog size: %lld", backlog_size);
-    redisLog(REDIS_DEBUG, "[PSYNC] First byte: %lld", backlog_off);
-    redisLog(REDIS_DEBUG, "[PSYNC] History len: %lld", backlog_histlen);
-    redisLog(REDIS_DEBUG, "[PSYNC] Current index: %lld", backlog_idx);
+    redisLog(REDIS_NOTICE, "[PSYNC] Backlog size: %lld", backlog_size);
+    redisLog(REDIS_NOTICE, "[PSYNC] First byte: %lld", backlog_off);
+    redisLog(REDIS_NOTICE, "[PSYNC] History len: %lld", backlog_histlen);
+    redisLog(REDIS_NOTICE, "[PSYNC] Current index: %lld", backlog_idx);
 
     /* Compute the amount of bytes we need to discard. */
     skip = offset - backlog_off;
-    redisLog(REDIS_DEBUG, "[PSYNC] Skipping: %lld", skip);
+    redisLog(REDIS_NOTICE, "[PSYNC] Skipping: %lld", skip);
 
     /* Point j to the oldest byte, that is actaully our
      * server.repl_backlog_off byte. */
     j = (backlog_idx + (backlog_size-backlog_histlen)) % backlog_size;
-    redisLog(REDIS_DEBUG, "[PSYNC] Index of first byte: %lld", j);
+    redisLog(REDIS_NOTICE, "[PSYNC] Index of first byte: %lld", j);
 
     /* Discard the amount of data to seek to the specified 'offset'. */
     j = (j + skip) % backlog_size;
@@ -348,11 +348,11 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     /* Feed slave with data. Since it is a circular buffer we have to
      * split the reply in two parts if we are cross-boundary. */
     len = backlog_histlen - skip;
-    redisLog(REDIS_DEBUG, "[PSYNC] Reply total length: %lld", len);
+    redisLog(REDIS_NOTICE, "[PSYNC] Reply total length: %lld", len);
     while(len) {
         long long thislen = ((backlog_size - j) < len) ? (backlog_size - j) : len;
 
-        redisLog(REDIS_DEBUG, "[PSYNC] addReply() length: %lld", thislen);
+        redisLog(REDIS_NOTICE, "[PSYNC] addReply() length: %lld", thislen);
         addReplySds(c,sdsnewlen(backlog + j, thislen));
         len -= thislen;
         j = 0;
