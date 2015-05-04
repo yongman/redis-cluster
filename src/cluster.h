@@ -56,6 +56,11 @@ typedef struct clusterLink {
 #define REDIS_NODE_PROMOTED 256 /* Master was a slave promoted by failover */
 #define REDIS_NODE_NULL_NAME "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
+/* Cluster node mode */
+#define REDIS_NODE_READABLE 1
+#define REDIS_NODE_WRITABLE 2
+#define REDIS_NODE_INITIAL_MODE (REDIS_NODE_READABLE|REDIS_NODE_WRITABLE)
+
 #define nodeIsMaster(n) ((n)->flags & REDIS_NODE_MASTER)
 #define nodeIsSlave(n) ((n)->flags & REDIS_NODE_SLAVE)
 #define nodeInHandshake(n) ((n)->flags & REDIS_NODE_HANDSHAKE)
@@ -81,7 +86,10 @@ typedef struct clusterNodeFailReport {
 typedef struct clusterNode {
     mstime_t ctime; /* Node object creation time. */
     char name[REDIS_CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
+    char tag[REDIS_TAG_STR_LEN];      /* Node tag */
     int flags;      /* REDIS_NODE_... */
+    int mode;       /* Permissions (read,write) */
+    uint64_t metaVersion; /* Meta version for broadcasting update */
     uint64_t configEpoch; /* Last configEpoch observed for this node */
     unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node */
     int numslots;   /* Number of slots handled by this node */
@@ -168,8 +176,10 @@ typedef struct {
     char ip[REDIS_IP_STR_LEN];  /* IP address last time it was seen */
     uint16_t port;              /* port last time it was seen */
     uint16_t flags;             /* node->flags copy */
+    char nodetag[REDIS_TAG_STR_LEN]; /* node->tag copy */
+    uint16_t mode;                   /* node->mode copy */
+    uint64_t metaVersion;            /* node->metaVersion copy */
     uint16_t notused1;          /* Some room for future improvements. */
-    uint32_t notused2;
 } clusterMsgDataGossip;
 
 typedef struct {
@@ -237,6 +247,9 @@ typedef struct {
     uint16_t flags;     /* Sender node flags */
     unsigned char state; /* Cluster state from the POV of the sender */
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
+    uint64_t metaVersion;    /* Sender meta version */
+    uint16_t mode;           /* Sender mode flags */
+    char sendertag[REDIS_TAG_STR_LEN];  /* Tag of the node */
     union clusterMsgData data;
 } clusterMsg;
 
@@ -252,5 +265,6 @@ typedef struct {
 clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *ask);
 int clusterRedirectBlockedClientIfNeeded(redisClient *c);
 void clusterRedirectClient(redisClient *c, clusterNode *n, int hashslot, int error_code);
+void clusterSetNodeTag(clusterNode *node, const char *tag);
 
 #endif /* __REDIS_CLUSTER_H */
