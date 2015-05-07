@@ -347,6 +347,7 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     long long backlog_off;
     long long backlog_histlen;
     long long backlog_idx;
+    long long unset_master_reploff;
 
     if (rvs) {
         backlog = server.rvs_backlog;
@@ -360,6 +361,7 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
         backlog_idx = server.repl_backlog_idx;
     }
     backlog_size = server.repl_backlog_size;
+    unset_master_reploff = server.unset_master_reploff;
 
     redisLog(REDIS_NOTICE, "[PSYNC] RVS backlog: %d", rvs);
     redisLog(REDIS_NOTICE, "[PSYNC] Slave request offset: %lld", offset);
@@ -373,6 +375,7 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     redisLog(REDIS_NOTICE, "[PSYNC] First byte: %lld", backlog_off);
     redisLog(REDIS_NOTICE, "[PSYNC] History len: %lld", backlog_histlen);
     redisLog(REDIS_NOTICE, "[PSYNC] Current index: %lld", backlog_idx);
+    redisLog(REDIS_NOTICE, "[PSYNC] Unset master offset: %lld", unset_master_reploff);
 
     /* Compute the amount of bytes we need to discard. */
     skip = offset - backlog_off;
@@ -457,6 +460,19 @@ int masterTryPartialResynchronization(redisClient *c) {
                 redisLog(REDIS_NOTICE,"Partial resynchronization not accepted Lack of backlog"
                          "(Slave request psync_offset was '%lld', repl_master_inital_offset is %lld).",
                          psync_offset, server.repl_master_initial_offset);
+                goto need_full_resync;
+            }
+            /* We may not have the data our sibling is asking for after many RVS psync operations,
+             * so that the check is necessary. */
+            if (psync_offset < server.rvs_backlog_off || 
+                psync_offset > (server.rvs_backlog_off + server.rvs_backlog_histlen))
+            {
+                redisLog(REDIS_NOTICE,
+                     "Unable to partial resync with sibling for lack of backlog (Sibling request was: %lld).", psync_offset);
+                if (psync_offset > server.master_repl_offset) {
+                    redisLog(REDIS_WARNING,
+                             "Warning: sibling tried to PSYNC with an offset that is greater than the master replication offset.");
+                }
                 goto need_full_resync;
             }
             rvs = 1;
@@ -1568,6 +1584,7 @@ void replicationSetMaster(char *ip, int port) {
     }
     disconnectSlaves(); /* Force our slaves to resync with us as well. */
     freeReplicationBacklog(); /* Don't allow our chained slaves to PSYNC. */
+    freeRvsBacklog();
     cancelReplicationHandshake();
     server.repl_state = REDIS_REPL_CONNECT;
     server.master_repl_offset = 0;
