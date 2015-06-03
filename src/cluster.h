@@ -9,7 +9,7 @@
 #define REDIS_CLUSTER_OK 0          /* Everything looks ok */
 #define REDIS_CLUSTER_FAIL 1        /* The cluster can't work */
 #define REDIS_CLUSTER_NAMELEN 40    /* sha1 hex length */
-#define REDIS_CLUSTER_PORT_INCR 10000 /* Cluster port = baseport + PORT_INCR */
+#define REDIS_CLUSTER_PORT_INCR 1 /* Cluster port = baseport + PORT_INCR */
 
 /* The following defines are amount of time, sometimes expressed as
  * multiplicators of the node timeout value (when ending with MULT). */
