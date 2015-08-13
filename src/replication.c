@@ -405,20 +405,6 @@ long long addReplyReplicationBacklog(redisClient *c, long long offset, int rvs) 
     return backlog_histlen - skip;
 }
 
-static redisClient* slaveWithReplState(int state) {
-    redisClient *slave = NULL;
-    listNode *ln;
-    listIter li;
-
-    listRewind(server.slaves,&li);
-    while((ln = listNext(&li))) {
-        slave = ln->value;
-        if (slave->replstate == state) break;
-    }
-
-    return slave;
-}
-
 /* Return the offset to provide as reply to the PSYNC command received
  * from the slave. The returned value is only valid immediately after
  * the BGSAVE process started and before executing any other command
@@ -609,7 +595,7 @@ int startBgsaveForReplication(int mincapa) {
     int retval;
     int socket_target = server.repl_diskless_sync && (mincapa & SLAVE_CAPA_EOF);
 
-    redisLog(REIDS_NOTICE,"Starting BGSAVE for SYNC with target: %s",
+    redisLog(REDIS_NOTICE,"Starting BGSAVE for SYNC with target: %s",
         socket_target ? "slaves sockets" : "disk");
 
     if (socket_target)
@@ -736,7 +722,7 @@ void syncCommand(redisClient *c) {
             /* Target is disk (or the slave is not capable of supporting
              * diskless replication) and we don't have a BGSAVE in progress,
              * let's start one. */
-            if (startBgsaveForReplication(c->slave_capa) != C_OK) {
+            if (startBgsaveForReplication(c->slave_capa) != REDIS_OK) {
                 redisLog(REDIS_NOTICE,"Replication failed, can't BGSAVE");
                 addReplyError(c,"Unable to perform background save");
                 return;
@@ -954,7 +940,6 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                  * is technically online now. */
                 slave->replstate = REDIS_REPL_ONLINE;
                 slave->repl_put_online_on_ack = 1;
-                server.fullsync_repl_offset = -1;
                 slave->repl_ack_time = server.unixtime; /* Timeout otherwise. */
             } else {
                 if (bgsaveerr != REDIS_OK) {
@@ -973,7 +958,6 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                 slave->replstate = REDIS_REPL_SEND_BULK;
                 slave->replpreamble = sdscatprintf(sdsempty(),"$%lld\r\n",
                     (unsigned long long) slave->repldbsize);
-                server.fullsync_repl_offset = -1;
 
                 aeDeleteFileEvent(server.el,slave->fd,AE_WRITABLE);
                 if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE, sendBulkToSlave, slave) == AE_ERR) {
