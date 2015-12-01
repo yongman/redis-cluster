@@ -56,7 +56,7 @@ void clusterSendFail(char *nodename);
 void clusterSendFailoverAuthIfNeeded(clusterNode *node, clusterMsg *request);
 void clusterUpdateState(void);
 int clusterNodeGetSlotBit(clusterNode *n, int slot);
-sds clusterGenNodesDescription(int filter, int extra);
+sds clusterGenNodesDescription(int filter, int extra, char *region);
 clusterNode *clusterLookupNode(char *name);
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave);
 int clusterAddSlot(clusterNode *n, int slot);
@@ -305,7 +305,7 @@ int clusterSaveConfig(int do_fsync) {
 
     /* Get the nodes description and concatenate our "vars" directive to
      * save currentEpoch and lastVoteEpoch. */
-    ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE, 0);
+    ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE, 0, NULL);
     ci = sdscatprintf(ci,"vars currentEpoch %llu lastVoteEpoch %llu\n",
         (unsigned long long) server.cluster->currentEpoch,
         (unsigned long long) server.cluster->lastVoteEpoch);
@@ -3786,7 +3786,7 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
  * The representation obtained using this function is used for the output
  * of the CLUSTER NODES function, and as format for the cluster
  * configuration file (nodes.conf) for a given node. */
-sds clusterGenNodesDescription(int filter, int extra) {
+sds clusterGenNodesDescription(int filter, int extra, char *region) {
     sds ci = sdsempty(), ni;
     dictIterator *di;
     dictEntry *de;
@@ -3799,6 +3799,16 @@ sds clusterGenNodesDescription(int filter, int extra) {
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
+        if (region) {
+            char *pch;
+            pch = strchr(node->tag,':');
+            if (pch && strncmp(region,node->tag,pch - node->tag) != 0) {
+                continue;
+            }
+            if (pch && strlen(region) != (unsigned)(pch - node->tag)) {
+                continue;
+            }
+        }
 
         if (node->flags & filter) continue;
         ni = clusterGenNodeDescription(node, extra);
@@ -3919,11 +3929,16 @@ void clusterCommand(redisClient *c) {
         } else {
             addReply(c,shared.ok);
         }
-    } else if (!strcasecmp(c->argv[1]->ptr,"nodes") && 
-               (c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
+    } else if (!strcasecmp(c->argv[1]->ptr,"nodes") &&
+               (c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")) ||
+               (c->argc ==  4 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
         /* CLUSTER NODES */
         robj *o;
-        sds ci = clusterGenNodesDescription(0,c->argc-2);
+        char *region = NULL;
+        if (c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")) {
+            region = c->argv[3]->ptr;
+        }
+        sds ci = clusterGenNodesDescription(0,c->argc-2,region);
 
         o = createObject(REDIS_STRING,ci);
         addReplyBulk(c,o);
