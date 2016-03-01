@@ -107,6 +107,7 @@ void replicationFeedRvsBacklog(void *ptr, size_t len) {
     /* Set the offset of the first byte we have in the backlog. */
     server.rvs_backlog_off = server.master->reploff -
                              server.rvs_backlog_histlen + 1;
+    redisLog(REDIS_WARNING, "rvs_backlog_off=%lld", server.rvs_backlog_off);
 }
 
 void createReplicationBacklog(void) {
@@ -186,6 +187,8 @@ void feedReplicationBacklog(void *ptr, size_t len) {
     /* Set the offset of the first byte we have in the backlog. */
     server.repl_backlog_off = server.master_repl_offset -
                               server.repl_backlog_histlen + 1;
+    redisLog(REDIS_WARNING, "master_repl_offset=%lld repl_backlog_off=%lld", 
+            server.master_repl_offset, server.repl_backlog_off);
 }
 
 /* Wrapper for feedReplicationBacklog() that takes Redis string objects
