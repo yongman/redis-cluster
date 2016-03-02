@@ -628,3 +628,23 @@ int anetSockName(int fd, char *ip, size_t ip_len, int *port) {
     }
     return 0;
 }
+
+int anetLocalIp(char *ip, size_t ip_len) {
+    int i;
+    char hostname[128];
+    struct hostent *he;
+    struct in_addr **addr_list;
+    if (gethostname(hostname, sizeof(hostname)) < 0) {
+        return -1;
+    }
+    if ((he = gethostbyname(hostname)) == NULL) {
+        return -1;
+    }
+
+    addr_list = (struct in_addr **)he->h_addr_list;
+    for(i = 0; addr_list[i] != NULL; i++) {
+        memcpy(ip, inet_ntoa(*addr_list[i]), ip_len);
+        return 0;
+    }
+    return 0;
+}

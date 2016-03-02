@@ -817,6 +817,8 @@ struct redisServer {
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     long long master_repl_offset;   /* Global replication offset */
     long long unset_master_reploff; /* Global replication offset when we became a master */
+    long long unset_slave_reploff;  /* Global replication offset when we changed role from master to salve */
+    char newmaster_addr[REDIS_PEER_ID_LEN+1];/* ip:port of node to be my new master */
     long long unset_master_ustime;  /* The time when we became a master */
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     char *repl_backlog;             /* Replication backlog for partial syncs */

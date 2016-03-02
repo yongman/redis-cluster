@@ -3085,6 +3085,7 @@ void clusterHandleManualFailover(void) {
     if (server.cluster->mf_can_start) return;
 
     if (server.cluster->mf_master_offset == 0) return; /* Wait for offset... */
+    redisLog(REDIS_NOTICE, "In HanleManualFailover, mf_master_offset:%lld repli_off:%lld", server.cluster->mf_master_offset, replicationGetSlaveOffset());
 
     if (server.cluster->mf_master_offset == replicationGetSlaveOffset()) {
         /* Our replication offset matches the master replication offset
@@ -3646,10 +3647,20 @@ void clusterSetMaster(clusterNode *n) {
     redisAssert(n != myself);
     redisAssert(myself->numslots == 0);
 
+    /* Set offset to -1 first */
+    server.unset_slave_reploff = -1;
+    server.newmaster_addr[0] = '\0';
+
     if (nodeIsMaster(myself)) {
         myself->flags &= ~REDIS_NODE_MASTER;
         myself->flags |= REDIS_NODE_SLAVE;
         clusterCloseAllSlots();
+
+        /* save the offset for pysnc to new master(a slave of mine) */
+        server.unset_slave_reploff = server.master_repl_offset;
+        /* save new master runid for psync */
+        snprintf(server.newmaster_addr,sizeof(server.newmaster_addr),"%s:%d",n->ip,n->port);
+
     } else {
         if (myself->slaveof)
             clusterNodeRemoveSlave(myself->slaveof,myself);
