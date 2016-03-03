@@ -168,7 +168,7 @@ void feedReplicationBacklog(void *ptr, size_t len) {
 
     server.master_repl_offset += len;
 
-    if (clientsArePaused()) {
+    if (server.clients_paused) {
         redisLog(REDIS_WARNING,"Attention: master_repl_offset increment %zu bytes to %lld",len,server.master_repl_offset);
     }
 
@@ -240,7 +240,8 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         }
 
         /* Add the SELECT command into the backlog. */
-        if (server.repl_backlog) feedReplicationBacklogWithObject(selectcmd);
+        /* When master pause client, don't add ping command to backlog */
+        if (server.repl_backlog && server.clients_paused == 0) feedReplicationBacklogWithObject(selectcmd);
 
         /* Send it to slaves. */
         listRewind(slaves,&li);
@@ -256,7 +257,8 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     server.slaveseldb = dictid;
 
     /* Write the command to the replication backlog if any. */
-    if (server.repl_backlog) {
+    /* When master pause client, don't add ping command to backlog */
+    if (server.repl_backlog && server.clients_paused == 0) {
         char aux[REDIS_LONGSTR_SIZE+3];
 
         /* Add the multi bulk reply length. */
