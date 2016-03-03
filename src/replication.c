@@ -1481,7 +1481,9 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
             /* +1 fix */
             server.master->reploff = server.unset_slave_reploff + 1;
             memcpy(server.repl_master_runid, runid, REDIS_RUN_ID_SIZE);
+            server.repl_master_runid[REDIS_RUN_ID_SIZE] = '\0';
             memcpy(server.master->replrunid, runid, REDIS_RUN_ID_SIZE);
+            server.master->replrunid[REDIS_RUN_ID_SIZE] = '\0';
             redisLog(REDIS_NOTICE, "Create new client to new master");
         }
         return PSYNC_CONTINUE;
