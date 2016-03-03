@@ -3658,6 +3658,7 @@ void clusterSetMaster(clusterNode *n) {
 
         /* save the offset for pysnc to new master(a slave of mine) */
         server.unset_slave_reploff = server.master_repl_offset;
+        redisLog(REDIS_NOTICE, "Save master_repl_offset(%lld) in order to repsync with a slave(to be new master)", server.master_repl_offset);
         /* save new master runid for psync */
         snprintf(server.newmaster_addr,sizeof(server.newmaster_addr),"%s:%d",n->ip,n->port);
 

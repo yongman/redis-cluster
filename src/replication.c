@@ -168,6 +168,10 @@ void feedReplicationBacklog(void *ptr, size_t len) {
 
     server.master_repl_offset += len;
 
+    if (clientsArePaused()) {
+        redisLog(REDIS_WARNING,"Attention: master_repl_offset increment %zu bytes to %lld",len,server.master_repl_offset);
+    }
+
     /* This is a circular buffer, so write as much data we can at every
      * iteration and rewind the "idx" index if we reach the limit. */
     while(len) {
