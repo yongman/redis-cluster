@@ -30,6 +30,7 @@
 
 
 #include "redis.h"
+#include "cluster.h"
 
 #include <sys/time.h>
 #include <unistd.h>
@@ -219,6 +220,11 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
      * we can return ASAP. */
     if (server.repl_backlog == NULL && listLength(slaves) == 0) return;
 
+    /* If client are paused for manual failover, do not feed backlog and slave */
+    /* this period will last for 10 seconds, (PING command also be blocked)
+     * please make sure replcation timeout larger than this value */
+    if (server.cluster_enabled && server.cluster->mf_end && server.clients_paused) return;
+
     /* We can't have slaves attached and no backlog. */
     redisAssert(!(listLength(slaves) != 0 && server.repl_backlog == NULL));
 
@@ -240,8 +246,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         }
 
         /* Add the SELECT command into the backlog. */
-        /* When master pause client, don't add ping command to backlog */
-        if (server.repl_backlog && server.clients_paused == 0) feedReplicationBacklogWithObject(selectcmd);
+        if (server.repl_backlog) feedReplicationBacklogWithObject(selectcmd);
 
         /* Send it to slaves. */
         listRewind(slaves,&li);
@@ -257,8 +262,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     server.slaveseldb = dictid;
 
     /* Write the command to the replication backlog if any. */
-    /* When master pause client, don't add ping command to backlog */
-    if (server.repl_backlog && server.clients_paused == 0) {
+    if (server.repl_backlog) {
         char aux[REDIS_LONGSTR_SIZE+3];
 
         /* Add the multi bulk reply length. */
