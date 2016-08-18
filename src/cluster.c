@@ -3750,23 +3750,25 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
         (node->link || node->flags & REDIS_NODE_MYSELF) ?
                     "connected" : "disconnected");
 
-    /* Slots served by this instance */
-    start = -1;
-    for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
-        int bit;
+    /* Slots served by this master instance */
+    if (node->flags & REDIS_NODE_MASTER) {
+        start = -1;
+        for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
+            int bit;
 
-        if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
-            if (start == -1) start = j;
-        }
-        if (start != -1 && (!bit || j == REDIS_CLUSTER_SLOTS-1)) {
-            if (bit && j == REDIS_CLUSTER_SLOTS-1) j++;
-
-            if (start == j-1) {
-                ci = sdscatprintf(ci," %d",start);
-            } else {
-                ci = sdscatprintf(ci," %d-%d",start,j-1);
+            if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
+                if (start == -1) start = j;
             }
-            start = -1;
+            if (start != -1 && (!bit || j == REDIS_CLUSTER_SLOTS-1)) {
+                if (bit && j == REDIS_CLUSTER_SLOTS-1) j++;
+
+                if (start == j-1) {
+                    ci = sdscatprintf(ci," %d",start);
+                } else {
+                    ci = sdscatprintf(ci," %d-%d",start,j-1);
+                }
+                start = -1;
+            }
         }
     }
 
