@@ -552,6 +552,29 @@ void loadServerConfigFromString(char *config) {
                 err = sentinelHandleConfiguration(argv+1,argc-1);
                 if (err) goto loaderr;
             }
+        }else if (!strcasecmp(argv[0], "aof-proxy-rate") && argc == 2) {
+            server.aof_proxy_rate = atoi(argv[1]);
+        }else if (!strcasecmp(argv[0], "aof-proxy-buf-flush-span") && argc == 2) {
+            server.aof_proxy_buf_flush_span = atoi(argv[1]);
+        }else if (!strcasecmp(argv[0],"aof-proxy-keylogfilenanme") && argc == 2) {
+            zfree(server.keylog_filename);
+            server.keylog_filename = zstrdup(argv[1]);
+        } else if (!strcasecmp(argv[0], "aof-proxy-max-key-len") && argc == 2) {
+            server.aof_proxy_max_key_len = atoi(argv[1]);
+        } else if (!strcasecmp(argv[0], "aof-proxy-select-db") && argc == 2) {
+            if ((server.aof_proxy_select_db = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
+        } else if (!strcasecmp(argv[0], "aof-proxy-check") && argc == 2) {
+            if ((server.aof_proxy_check = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
+        } else if (!strcasecmp(argv[0], "aof-proxy-to") && argc == 3) {
+            // AOF proxy config
+            server.aof_proxy_to_host = sdsnew(argv[1]);
+            server.aof_proxy_to_port = atoi(argv[2]);
+        } else if (!strcasecmp(argv[0], "aof-proxy-timeout") && argc == 2) {
+            server.aof_proxy_timeout = atoi(argv[1]);
         } else {
             err = "Bad directive or wrong number of arguments"; goto loaderr;
         }
@@ -1950,4 +1973,30 @@ void configCommand(redisClient *c) {
 badarity:
     addReplyErrorFormat(c,"Wrong number of arguments for CONFIG %s",
         (char*) c->argv[1]->ptr);
+}
+
+void slot2nodeCommand(redisClient *c) {
+    long long slot;
+    if (c->argc == 3) {
+        robj* rslot = c->argv[1];
+        robj* raddr = c->argv[2];
+
+        getLongLongFromObject(rslot, &slot);
+        if (slot < 0 || slot > 16383 || sdslen(raddr->ptr) > 64) {
+            addReplySds(c,sdsnew("-ERR 0<slot<16383 and addr length<64"));
+            return;
+        }
+        strncpy(server.slot2node[slot],raddr->ptr,sdslen(raddr->ptr));
+    } else if (c->argc ==2) {
+        robj* rslot = c->argv[1];
+        getLongLongFromObject(rslot, &slot);
+        if (slot < 0 || slot > 16383) {
+            addReplySds(c, sdsnew("-ERR 0<slot<16383"));
+            return;
+        }
+    } else {
+        addReplySds(c,sdscatprintf(sdsempty(),"-ERR argument error. slot2node <slot> \"127.0.0.1:6379\"\r\n"));
+        return;
+    }
+    addReplySds(c,sdscatprintf(sdsempty(),"+OK slot %lld point to server %s \r\n",slot, (char *)server.slot2node[slot]));
 }

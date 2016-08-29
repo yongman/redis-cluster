@@ -133,6 +133,8 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_DEFAULT_LATENCY_MONITOR_THRESHOLD 0
 #define REDIS_DEFAULT_CLUSTER_AUTOFAILOVER 0
 
+#define REDIS_MAX_KEYLOGMSG_LEN 8192
+
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
 #define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
 #define ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC 25 /* CPU max % for keys collection */
@@ -230,6 +232,10 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_AOF_OFF 0             /* AOF is off */
 #define REDIS_AOF_ON 1              /* AOF is on */
 #define REDIS_AOF_WAIT_REWRITE 2    /* AOF waits rewrite to start appending */
+
+#define REDIS_DEFAULT_KEYLOG_FILENAME "log/keylog"
+#define REDIS_DEFAULT_AOF_PROXY_MAX_KEY_LENGTH 32768
+#define REDIS_DEFAULT_AOF_PROXY_RATE 80000
 
 /* Client flags */
 #define REDIS_SLAVE (1<<0)   /* This client is a slave server */
@@ -788,6 +794,26 @@ struct redisServer {
     int aof_stop_sending_diff;     /* If true stop sending accumulated diffs
                                       to child process. */
     sds aof_child_diff;             /* AOF diff accumulator child side. */
+    /* AOF Proxy */
+	char *aof_proxy_to_host;        /* proxy-to host */
+    int aof_proxy_to_port;          /* proxy-to port */
+    long aof_proxy_timeout;         /* timeout in process of proxy */
+    pthread_t aof_proxy_recv_tid;   /* proxy recv thread id */
+    int aof_proxy_check;            /* weather to check proxy result */
+    int aof_proxy_select_db;        /* weather to proxy select cmd */
+    int aof_proxy_max_key_len;      /* max key length to proxy */
+    int aof_proxy_rate;             /* max keys process every second */
+    int aof_proxy_buf_flush_span;   /* buf flush interval every 1k write */
+    int aof_proxy_backend_type;     /* backend type 0:redis, 1:other */
+    struct {
+        int start;
+        int end;
+        int enable:1;
+    } aof_proxy_range;              /* boundary for aof proxy range filter */
+    char *keylog_filename;          /* keylog */
+    pthread_mutex_t keylog_mutex;   /* keylog lock */
+    char* slot2node[16384][64];     /* save the slot to node address map */
+
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
@@ -1182,6 +1208,7 @@ unsigned long long estimateObjectIdleTime(robj *o);
 ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout);
 ssize_t syncRead(int fd, char *ptr, ssize_t size, long long timeout);
 ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout);
+ssize_t syncDropRead(int fd, char *ptr, ssize_t size, long long timeout);
 
 /* Replication */
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
@@ -1274,6 +1301,14 @@ void redisLog(int level, const char *fmt, ...)
 #else
 void redisLog(int level, const char *fmt, ...);
 #endif
+#ifdef __GNUC__
+void redisKeyLog(int level, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+#else
+void redisKeyLog(const char *fmt, ...);
+#endif
+void redisKeyLogRaw(int level, const char *msg);
+
 void redisLogRaw(int level, const char *msg);
 void redisLogFromHandler(int level, const char *msg);
 void usage(void);
@@ -1568,6 +1603,10 @@ void pfcountCommand(redisClient *c);
 void pfmergeCommand(redisClient *c);
 void pfdebugCommand(redisClient *c);
 void latencyCommand(redisClient *c);
+void aof2proxyCommand(redisClient *c);
+void bufflushspanCommand(redisClient *c);
+void proxyrateCommand(redisClient *c);
+void slot2nodeCommand(redisClient *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));

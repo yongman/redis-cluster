@@ -143,3 +143,25 @@ ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout) {
     }
     return nread;
 }
+
+/* Read the first char and drop left data
+ *
+ * On success the number of bytes read is returned, otherwise -1.
+ * On success the string is always correctly terminated with a 1 byte. */
+ssize_t syncDropRead(int fd, char *ptr, ssize_t size, long long timeout) {
+    int flag = 0;
+    while(size) {
+        char c;
+
+        if (syncRead(fd,&c,1,timeout) == -1) return -1;
+        if (flag == 0) {
+            ptr[0] = c;
+            flag = 1;
+        }
+        if (c == '\n') {
+            return 1;
+        }
+        size--;
+    }
+    return 1;
+}

@@ -41,6 +41,70 @@
 
 void aofUpdateCurrentSize(void);
 void aofClosePipes(void);
+static int connectToProxy(void);
+
+/* get host ip:port stored in server.slot2node */
+static char* lookupDestIpAndPort(redisClient *c) {
+    int slot;
+    /* calculate the slot the key distribute in redis3.0 */
+    slot = crc16(c->argv[3]->ptr,sdslen(c->argv[3]->ptr)) & 0x3FFF;
+    return server.slot2node[slot];
+}
+
+/* returns 0 on error, 1 on success */
+static int copyKeytoDest(redisClient *c,sds keystr) {
+    robj **argv = c->argv;
+    int j;
+    struct redisCommand *cmd;
+    char *addr;
+    char host[64],port[64];
+
+    memset(host,'\0',sizeof(host));
+    memset(port,'\0',sizeof(port));
+    /* use cmd:copykey to copy an dumped value to destination*/
+    /* cmd */
+    argv[0] = createStringObject("COPYKEY",7);
+
+    redisLog(REDIS_DEBUG,"before copy key:%s",keystr);
+
+    /* key */
+    argv[3] = createStringObject(keystr,sdslen(keystr));
+    if ((addr = lookupDestIpAndPort(c)) && strlen(addr) == 0) {
+        redisLog(REDIS_WARNING,"slot2node incomplete");
+        return 0;
+    }
+    char *tok = strchr(addr, ':');
+    /* host */
+    strncpy(host,addr,tok - addr);
+    argv[1] = createStringObject(host,strlen(host));
+    /* port */
+    strcpy(port,tok+1);
+    argv[2] = createStringObject(port,strlen(port));
+    /* timeout */
+    argv[4] = createStringObjectFromLongLong(server.aof_proxy_timeout);
+
+    /* execute cmd and wait for reply */
+    /* Command lookup */
+    cmd = lookupCommand(argv[0]->ptr);
+    if (!cmd) {
+        redisLog(REDIS_WARNING,"Unknown command '%s' reading the append only file", (char*)argv[0]->ptr);
+        exit(1);
+    }
+    redisLog(REDIS_DEBUG,"migrate key '%s' to %s:%s use COPYKEY cmd",keystr,host,port);
+
+    cmd->proc(c);
+    redisLog(REDIS_DEBUG,"copy key '%s' proc end. msg:%s",keystr,c->buf);
+    /* Clean up. Command code may have changed argv/argc so we use the
+    * argv/argc of the client instead of the local variables. */
+    for (j = 0; j < c->argc; j++)
+        decrRefCount(c->argv[j]);
+    /* end copykey */
+    redisLog(REDIS_DEBUG,"end of the copykeytoDest func");
+    if (c->buf[0] == '-') {
+        return 0;
+    }
+    return 1;
+}
 
 /* ----------------------------------------------------------------------------
  * AOF rewrite buffer implementation.
@@ -58,10 +122,127 @@ void aofClosePipes(void);
 
 #define AOF_RW_BUF_BLOCK_SIZE (1024*1024*10)    /* 10 MB per block */
 
+#define SYNC_READ_MAX_LENGTH (1024*1024*1024)
+
 typedef struct aofrwblock {
     unsigned long used, free;
     char buf[AOF_RW_BUF_BLOCK_SIZE];
 } aofrwblock;
+
+typedef int (*ioFunc) (rio *payload, int timeout);
+
+static void *aofRecvFuncEx(void *arg) {
+    char buf[1];
+    long timeout = server.aof_proxy_timeout <= 0 ? 1 : server.aof_proxy_timeout;
+    while(1) {
+        aeWait(server.aof_fd, AE_READABLE, -1);
+        if (syncDropRead(server.aof_fd, buf, SYNC_READ_MAX_LENGTH, timeout) < 0) {
+            redisLog(REDIS_WARNING, "Proxy dropread respond failed, close and reconnect");
+            while(connectToProxy() != REDIS_OK) {
+                usleep(100 * 1000);
+            }
+        }
+
+        if (server.aof_proxy_check && buf[0] == '-') {
+            redisLog(REDIS_WARNING, "Target instance replied with error Exiting...");
+            exit(1);
+        }
+    }
+}
+
+static void *aofRecvFunc(void *arg) {
+    char buf[1];
+    long timeout = server.aof_proxy_timeout <= 0 ? 1 : server.aof_proxy_timeout;
+    while (1) {
+        while (1) {
+            /* Always read data, if possible */
+            int retval = aeWait(server.aof_fd, AE_READABLE, 1000);
+            if (retval & AE_READABLE) {
+                break;
+            }
+
+            if (*(int*)arg == 1) {
+                /* No data to read, we check flag to exit */
+                pthread_exit(NULL);
+            }
+        }
+        if (syncDropRead(server.aof_fd, buf, SYNC_READ_MAX_LENGTH, timeout) < 0) {
+            redisLog(REDIS_WARNING, "Proxy dropread respond failed, close and reconnect");
+            while(connectToProxy() != REDIS_OK) {
+                usleep(100 * 1000);
+            }
+            redisLog(REDIS_WARNING, "Proxy read respond failed: %s", strerror(errno));
+        }
+
+        if (server.aof_proxy_check && buf[0] == '-') {
+            redisLog(REDIS_WARNING, "Target instance replied with error");
+            exit(1);
+        }
+    }
+}
+
+static int aofRecvWorkerCreate(void * arg, int sync) {
+	if (sync) {
+        if (pthread_create(&server.aof_proxy_recv_tid, NULL, aofRecvFunc, arg) != 0) {
+            return -1;
+        }
+    } else {
+        if (pthread_create(&server.aof_proxy_recv_tid, NULL, aofRecvFuncEx, NULL) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static long long nowUsec(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
+static int proxyWriteQuery(rio *payload, int timeout) {
+    sds buf = payload->io.buffer.ptr;
+    size_t pos = 0;
+    size_t towrite = 0;
+    int nwritten = 0;
+    static long count = 0;
+    long long start_usec = nowUsec();
+    long long now_usec;
+    const long precision = 1000; //1000us
+
+    while ((towrite = sdslen(buf) - pos) > 0) {
+        towrite = (towrite > (1024) ? (1024) : towrite);
+write_again:
+        nwritten = syncWrite(server.aof_fd, buf + pos, towrite, timeout);
+        if (nwritten != (signed)towrite) {
+            redisLog(REDIS_WARNING, "Write to proxy failed, close and reconnect");
+            while (connectToProxy() != REDIS_OK) {
+                usleep(100 * 1000);
+            }
+            goto write_again;
+        }
+        pos += nwritten;
+
+        ++count;
+
+        if (count >= server.aof_proxy_rate/(1000000/precision)) {
+            now_usec = nowUsec();
+            long gap = now_usec - start_usec;
+            if (gap < precision && gap >0) {
+                redisLog(REDIS_DEBUG, "aof proxy start to sleep %ldus", precision - gap);
+                usleep(precision - gap);
+                count = 0;
+                start_usec = nowUsec();
+            } else {
+                //redisLog(REDIS_DEBUG, "aof proxy start to sleep %ldus", precision);
+                //usleep(precision);
+                start_usec = nowUsec();
+                count = 0;
+            }
+        }
+    }
+    return 0;
+}
 
 /* This function free the old AOF rewrite buffer if needed, and initialize
  * a fresh new one. It tests for server.aof_rewrite_buf_blocks equal to NULL
@@ -157,13 +338,6 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
             }
         }
     }
-
-    /* Install a file event to send data to the rewrite child if there is
-     * not one already. */
-    if (aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0) {
-        aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
-            AE_WRITABLE, aofChildWriteDiffData, NULL);
-    }
 }
 
 /* Write the buffer (possibly composed of multiple blocks) into the specified
@@ -189,6 +363,54 @@ ssize_t aofRewriteBufferWrite(int fd) {
         }
     }
     return count;
+}
+
+static ssize_t aofRewriteBufferWriteEx(int fd) {
+    long timeout = server.aof_proxy_timeout <= 0 ? 1 : server.aof_proxy_timeout;
+    listNode *ln;
+    listIter li;
+    ssize_t count = 0;
+    ssize_t towrite = 0;
+    ssize_t pos = 0;
+    listRewind(server.aof_rewrite_buf_blocks, &li);
+    connectToProxy();
+    while((ln = listNext(&li)))    {
+        aofrwblock *block = listNodeValue(ln);
+        ssize_t nwritten = 0;
+
+        if (block->used) {
+            pos = 0;
+            while ((towrite = block->used - pos) > 0) {
+                towrite = towrite > 1024 ? 1024 : towrite;
+                nwritten = syncWrite(fd, block->buf + pos, towrite, timeout);
+                if (nwritten == -1) {
+                    while(connectToProxy() != REDIS_OK) {
+                        redisLog(REDIS_WARNING, "Reconnect to proxy after 100ms");
+                        usleep(100 * 1000);
+                    }
+                }
+                pos += nwritten;
+
+                redisLog(REDIS_DEBUG, "aofRewriteBufferWriteEx: aof proxy sleep %dus", server.aof_proxy_buf_flush_span);
+                usleep(server.aof_proxy_buf_flush_span);
+            }
+        }
+        count += nwritten;
+    }
+    redisLog(REDIS_NOTICE, "aof rewrite buffer done");
+    return count;
+}
+
+static int aofRewriteBufferProxyWrite(void) {
+    if (aofRecvWorkerCreate(NULL, 0)) {
+        redisLog(REDIS_WARNING, "Create recv worker thread failed.");
+        return -1;
+    }
+    if (aofRewriteBufferWriteEx(server.aof_fd) == -1) {
+        redisLog(REDIS_WARNING, "Aof rewrite buffer write failed, errmsg: %s.", strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /* ----------------------------------------------------------------------------
@@ -230,9 +452,10 @@ void stopAppendOnly(void) {
     }
 }
 
+
 /* Called when the user switches from "appendonly no" to "appendonly yes"
  * at runtime using the CONFIG command. */
-int startAppendOnly(void) {
+static int startLocalAppendOnly(void) {
     server.aof_last_fsync = server.unixtime;
     server.aof_fd = open(server.aof_filename,O_WRONLY|O_APPEND|O_CREAT,0644);
     redisAssert(server.aof_state == REDIS_AOF_OFF);
@@ -249,6 +472,50 @@ int startAppendOnly(void) {
      * in order to append data on disk. */
     server.aof_state = REDIS_AOF_WAIT_REWRITE;
     return REDIS_OK;
+}
+
+static int connectToProxy(void) {
+    /* 
+     * There may be hug data to be tranmited, timeout could not be proper caculated.
+     * So we use block io first.
+     */
+
+    int fd = anetTcpNonBlockConnect(NULL, server.aof_proxy_to_host, server.aof_proxy_to_port);
+    if (fd == -1) {
+        redisLog(REDIS_WARNING, "Unable to connect to backend: %s.", strerror(errno));
+        return REDIS_ERR;
+    }
+    anetEnableTcpNoDelay(NULL, fd);
+    if (server.aof_fd > 0) {
+        close(server.aof_fd);
+    }
+
+    server.aof_fd = fd;
+    return REDIS_OK;
+}
+
+static int startProxyAppendOnly(void) {
+    redisAssert(server.aof_state == REDIS_AOF_OFF);
+    server.aof_last_fsync = server.unixtime;
+    while (connectToProxy() != REDIS_OK) {
+        redisLog(REDIS_WARNING, "Try to reconnect to backend after 100ms");
+        usleep(100 * 1000);
+    }
+    if (rewriteAppendOnlyFileBackground() == REDIS_ERR) {
+        close(server.aof_fd);
+        redisLog(REDIS_WARNING, "Redis needs to enable the AOP buf can't trigger a background AOF proxy operation. Check the above logs for more info about the error.Exiting...");
+        exit(1);
+    }
+    server.aof_state = REDIS_AOF_WAIT_REWRITE;
+    return REDIS_OK;
+}
+
+int startAppendOnly(void) {
+    if (!server.aof_proxy_to_host) {
+        return startLocalAppendOnly();
+    } else {
+        return startProxyAppendOnly();
+    }
 }
 
 /* Write the append only file buffer on disk.
@@ -270,7 +537,7 @@ int startAppendOnly(void) {
  * However if force is set to 1 we'll write regardless of the background
  * fsync. */
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
-void flushAppendOnlyFile(int force) {
+static void flushLocalAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
     mstime_t latency;
@@ -429,6 +696,48 @@ void flushAppendOnlyFile(int force) {
                 server.unixtime > server.aof_last_fsync)) {
         if (!sync_in_progress) aof_background_fsync(server.aof_fd);
         server.aof_last_fsync = server.unixtime;
+    }
+}
+
+static void flushProxyAppendOnlyFile(int force) {
+    ssize_t nwritten;
+    //int sync_in_progress = 0;
+
+    if (sdslen(server.aof_buf) == 0) {
+        return;
+    }
+
+    server.aof_flush_postponed_start = 0;
+    long timeout = server.aof_proxy_timeout <= 0 ? 1 : server.aof_proxy_timeout;
+rewrite:
+    nwritten = syncWrite(server.aof_fd, server.aof_buf, sdslen(server.aof_buf), timeout);
+    if (nwritten != (signed)sdslen(server.aof_buf)) {
+        redisLog(REDIS_WARNING, "AOF buffer flush error: %s, can't proceed aof proxy", strerror(errno));
+        while (connectToProxy() != REDIS_OK) {
+            redisLog(REDIS_WARNING, "Try to reconnect after 100ms");
+            usleep(100 * 1000);
+        }
+        //reconnected
+        redisLog(REDIS_NOTICE, "reconnect done. rewrite buffer to proxy");
+        goto rewrite;
+    } else {
+        server.aof_last_write_status = REDIS_OK;
+    }
+    server.aof_current_size += nwritten;
+
+    if ((sdslen(server.aof_buf)+sdsavail(server.aof_buf)) < 4000) {
+        sdsclear(server.aof_buf);
+    } else {
+        sdsfree(server.aof_buf);
+        server.aof_buf = sdsempty();
+    }
+}
+
+void flushAppendOnlyFile(int force) {
+    if (!server.aof_proxy_to_host) {
+        flushLocalAppendOnlyFile(force);
+    } else {
+        flushProxyAppendOnlyFile(force);
     }
 }
 
@@ -1176,6 +1485,217 @@ werr:
     return REDIS_ERR;
 }
 
+int proxyAppendOnlyData(void) {
+    /*
+     * There may be hug data to be transmite, so timeout could not be proper caculated.
+     * Timeout here has no effect to block io
+     */
+    long timeout = server.aof_proxy_timeout <= 0 ? 1 : server.aof_proxy_timeout;
+    long long now = mstime();
+
+    dictIterator *di = NULL;
+    dictEntry *de = NULL;
+
+    rio payload;
+    rioInitWithBuffer(&payload, sdsempty());
+
+    ioFunc proxyIO = NULL;
+    int methodFlag = 0;     /* 0:use proxy 1:copykey to destination directly*/
+
+    struct redisClient *fakeClient;
+    robj **argv;
+    /* create a fake client to excute COPYKEY cmd */
+    fakeClient = createFakeClient();
+    fakeClient->argc = 5;
+    argv = zmalloc(sizeof(robj*)*5);
+    fakeClient->argv = argv;
+
+    proxyIO = proxyWriteQuery;
+    int stopflag = 0;
+    int workerflag = aofRecvWorkerCreate(&stopflag, 1);
+    if (workerflag) {
+        goto werr;
+    }
+    for (int i = 0; i < server.dbnum; i++) {
+        char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
+
+        redisDb *db = server.db + i;
+        dict *d = db->dict;
+        if (dictSize(d) == 0) {
+            continue;
+        }
+
+        di = dictGetSafeIterator(d);
+        if (!di) {
+            goto werr;
+        }
+
+        /*
+         * If want to proxy aof to an twemproxy,
+         * we must disable SELECT.
+         */
+        if (server.aof_proxy_select_db) {
+            if (rioWrite(&payload, selectcmd, sizeof(selectcmd) - 1) == 0) {
+                goto werr;
+            }
+            if (rioWriteBulkLongLong(&payload, i) == 0) {
+                goto werr;
+            }
+            if (proxyIO(&payload, timeout)) {
+                goto werr;
+            }
+            sdsclear(payload.io.buffer.ptr);
+            payload.io.buffer.pos = 0;
+        }
+
+        while((de = dictNext(di)) != NULL) {
+            sds keystr;
+            robj key, *o;
+            long long expiretime;
+
+            keystr = dictGetKey(de);
+            redisLog(REDIS_DEBUG,"prepare to write key:%s",keystr);
+
+            /* Threshold for key length */
+            if (server.aof_proxy_max_key_len > 0 && sdslen(keystr) > server.aof_proxy_max_key_len) {
+                redisKeyLog(REDIS_WARNING, "Key: %.*s Errmsg: exceed %d Action: ignore", sdslen(keystr),
+                        keystr, server.aof_proxy_max_key_len);
+                continue;
+            }
+
+            o = dictGetVal(de);
+            initStaticStringObject(key, keystr);
+
+            expiretime = getExpire(db, &key);
+            if (expiretime != -1 && expiretime < now) {
+                continue;
+            }
+
+            if (o->type == REDIS_STRING) {
+                methodFlag = 0;
+                char cmd[] = "*3\r\n$3\r\nSET\r\n";
+                if (rioWrite(&payload, cmd, sizeof(cmd) - 1) == 0) {
+                    goto werr;
+                }
+                if (rioWriteBulkObject(&payload, &key) == 0) {
+                    goto werr;
+                }
+                if (rioWriteBulkObject(&payload, o) == 0) {
+                    goto werr;
+                }
+            } else if (o->type == REDIS_LIST) {
+                if (!server.aof_proxy_backend_type && listTypeLength(o) >= REDIS_AOF_REWRITE_ITEMS_PER_CMD) {
+                    methodFlag = 1;
+                    if (copyKeytoDest(fakeClient, keystr) == 0) {
+                        redisKeyLog(REDIS_WARNING, "Key: %.*s Errmsg: copyKeytoDest failed. [mark]", sdslen(keystr), keystr);
+                        continue;
+                    }
+                } else if (rewriteListObject(&payload, &key, o) == 0) {
+                    goto werr;
+                } else {
+                    methodFlag = 0;
+                }
+            } else if (o->type == REDIS_SET) {
+                if (!server.aof_proxy_backend_type && setTypeSize(o) > REDIS_AOF_REWRITE_ITEMS_PER_CMD) {
+                    methodFlag = 1;
+                    if (copyKeytoDest(fakeClient, keystr) == 0) {
+                        redisKeyLog(REDIS_WARNING, "Key: %.*s Errmsg: copyKeytoDest failed. [mark]", sdslen(keystr), keystr);
+                        continue;
+                    }
+                } else if (rewriteSetObject(&payload, &key, o) == 0) {
+                    goto werr;
+                } else {
+                    methodFlag = 0;
+                }
+            } else if (o->type == REDIS_ZSET) {
+                if (!server.aof_proxy_backend_type && zsetLength(o) > REDIS_AOF_REWRITE_ITEMS_PER_CMD) {
+                    methodFlag = 1;
+                    if (copyKeytoDest(fakeClient,keystr) == 0) {
+                        redisKeyLog(REDIS_WARNING, "Key: %.*s Errmsg: copyKeytoDest failed. [mark]", sdslen(keystr), keystr);
+                        continue;
+                    }
+                } else if (rewriteSortedSetObject(&payload, &key, o) == 0) {
+                    goto werr;
+                } else {
+                    methodFlag = 0;
+                }
+            } else if (o->type == REDIS_HASH) {
+                if (!server.aof_proxy_backend_type && hashTypeLength(o) > REDIS_AOF_REWRITE_ITEMS_PER_CMD) {
+                    methodFlag = 1;
+                    if (copyKeytoDest(fakeClient, keystr) == 0) {
+                        redisKeyLog(REDIS_WARNING, "Key: %.*s Errmsg: copyKeytoDest failed. [mark]", sdslen(keystr), keystr);
+                        continue;
+                    }
+                } else if (rewriteHashObject(&payload, &key, o) == 0) {
+                    goto werr;
+                } else {
+                    methodFlag = 0;
+                }
+            } else {
+                redisPanic("Unknown object type");
+            }
+
+            redisKeyLog(REDIS_DEBUG, "Key: %s ValueLen: %lu", keystr, rioTell(&payload) - sdslen(keystr));
+
+            if (methodFlag == 0 && proxyIO(&payload, timeout)) {
+                redisKeyLog(REDIS_WARNING, "Key: %s Error: %s", keystr, strerror(errno));
+                goto werr;
+            }
+            sdsclear(payload.io.buffer.ptr);
+            payload.io.buffer.pos = 0;
+
+            if (methodFlag == 0 && expiretime != -1) {
+                char cmd[] = "*3\r\n$9\r\nPEXPIREAT\r\n";
+                if (rioWrite(&payload, cmd, sizeof(cmd) - 1) == 0) {
+                    goto werr;
+                }
+                if (rioWriteBulkObject(&payload, &key) == 0) {
+                    goto werr;
+                }
+                if (rioWriteBulkLongLong(&payload, expiretime) == 0) {
+                    goto werr;
+                }
+
+                if (proxyIO(&payload, timeout)) {
+                    redisKeyLog(REDIS_WARNING, "Key: %s Error: %s", keystr, strerror(errno));
+                    goto werr;
+                }
+                sdsclear(payload.io.buffer.ptr);
+                payload.io.buffer.pos = 0;
+            }
+
+        }
+
+        dictReleaseIterator(di);
+    }
+
+    stopflag = 1;
+    pthread_join(server.aof_proxy_recv_tid, NULL);
+
+    /*clean the fakeclient */
+    zfree(fakeClient->argv);
+    freeFakeClient(fakeClient);
+
+    sdsfree(payload.io.buffer.ptr);
+    close(server.aof_fd);
+    redisLog(REDIS_NOTICE, "SYNC append only file proxy performed");
+    return REDIS_OK;
+
+werr:
+    if (!workerflag) {
+        stopflag = 1;
+        pthread_join(server.aof_proxy_recv_tid, NULL);
+    }
+    sdsfree(payload.io.buffer.ptr);
+    close(server.aof_fd);
+    redisLog(REDIS_WARNING, "Write error proxying append only data to backend: %s", strerror(errno));
+    if (di) {
+        dictReleaseIterator(di);
+    }
+    return REDIS_ERR;
+}
+
+
 /* ----------------------------------------------------------------------------
  * AOF rewrite pipes for IPC
  * -------------------------------------------------------------------------- */
@@ -1266,7 +1786,7 @@ void aofClosePipes(void) {
  *    finally will rename(2) the temp file in the actual file name.
  *    The the new file is reopened as the new append only file. Profit!
  */
-int rewriteAppendOnlyFileBackground(void) {
+static int rewriteLocalAppendOnlyDataBackground(void) {
     pid_t childpid;
     long long start;
 
@@ -1320,6 +1840,62 @@ int rewriteAppendOnlyFileBackground(void) {
     return REDIS_OK; /* unreached */
 }
 
+static int rewriteProxyAppendOnlyDataBackground(void) {
+    pid_t childpid;
+    long long start;
+    if (server.aof_child_pid != -1) {
+        return REDIS_ERR;
+    }
+
+    if (aofCreatePipes() != REDIS_OK) return REDIS_ERR;
+
+    start = ustime();
+
+    if ((childpid = fork()) == 0) {
+        closeListeningSockets(0);
+        redisSetProcTitle("redis-aof-proxy");
+        if (proxyAppendOnlyData() == REDIS_OK) {
+            size_t private_dirty = zmalloc_get_private_dirty();
+            if (private_dirty) {
+                redisLog(REDIS_NOTICE, 
+                        "AOP proxy: %zu MB of memory used by copy-on-write", private_dirty/(1024*1024));
+            }
+            exitFromChild(0);
+        } else {
+            exitFromChild(1);
+        }
+    } else {
+        /* Parent */
+        server.stat_fork_time = ustime() - start;
+        if (childpid == -1) {
+            redisLog(REDIS_WARNING,
+                    "Can't proxy append only data in background: fork: %s", strerror(errno));
+            return REDIS_ERR;
+        }
+
+        redisLog(REDIS_NOTICE,
+                "Background append only data rewriting started by pid %d", childpid);
+
+        server.aof_rewrite_scheduled = 0;
+        server.aof_rewrite_time_start = time(NULL);
+        server.aof_child_pid = childpid;
+        updateDictResizePolicy();
+
+        server.aof_selected_db = -1;
+        replicationScriptCacheFlush();
+        return REDIS_OK;
+    }
+    return REDIS_OK; /* unreached */
+}
+
+int rewriteAppendOnlyFileBackground(void) {
+    if (!server.aof_proxy_to_host) {
+        return rewriteLocalAppendOnlyDataBackground();
+    } else {
+        return rewriteProxyAppendOnlyDataBackground();
+    }
+}
+
 void bgrewriteaofCommand(redisClient *c) {
     if (server.aof_child_pid != -1) {
         addReplyError(c,"Background append only file rewriting already in progress");
@@ -1361,7 +1937,7 @@ void aofUpdateCurrentSize(void) {
 
 /* A background append only file rewriting (BGREWRITEAOF) terminated its work.
  * Handle this. */
-void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
+static void backgroundLocalRewriteDoneHandler(int exitcode, int bysignal) {
     if (!bysignal && exitcode == 0) {
         int newfd, oldfd;
         char tmpfile[256];
@@ -1504,3 +2080,122 @@ cleanup:
     if (server.aof_state == REDIS_AOF_WAIT_REWRITE)
         server.aof_rewrite_scheduled = 1;
 }
+
+static void backgroundProxyRewriteDoneHandler(int exitcode, int bysignal) {
+    if (!bysignal && exitcode == 0) {
+        long long now = ustime();
+        redisLog(REDIS_NOTICE,
+                "Background AOF proxy terminated with success");
+        if (server.aof_fd == -1) {
+            redisLog(REDIS_WARNING,
+                    "Unable to connect to the same backend as the child do: %s", strerror(errno));
+            goto cleanup;
+        }
+
+        if (aofRewriteBufferProxyWrite() == -1) {
+            redisLog(REDIS_WARNING,
+                    "Error trying to flush the parent diff to the proxy: %s. Exiting...", strerror(errno));
+            close(server.aof_fd);
+            //goto cleanup;
+            exit(1);
+        }
+
+        redisLog(REDIS_NOTICE,
+                "Parent diff successfully flushed to the proxy (%lu bytes)", aofRewriteBufferSize());
+
+        server.aof_selected_db = -1;
+        sdsfree(server.aof_buf);
+        server.aof_buf = sdsempty();
+
+        server.aof_lastbgrewrite_status = REDIS_OK;
+
+        redisLog(REDIS_NOTICE, "Background AOF proxy finished successfully");
+        if (server.aof_state == REDIS_AOF_WAIT_REWRITE) {
+            server.aof_state = REDIS_AOF_ON;
+        }
+        redisLog(REDIS_VERBOSE,
+                "Background AOF proxy signal handler took %lldus", ustime()-now);
+    } else if (!bysignal && exitcode != 0) {
+        server.aof_lastbgrewrite_status = REDIS_ERR;
+        redisLog(REDIS_WARNING,
+                "Background AOF proxy terminated with error. Exiting...");
+        exit(1);
+    } else {
+        server.aof_lastbgrewrite_status = REDIS_ERR;
+        redisLog(REDIS_WARNING,
+                "Background AOF proxy terminated by signal %d. Exiting...", bysignal);
+        exit(1);
+    }
+
+cleanup:
+    redisLog(REDIS_NOTICE, "background rewrite done handler");
+    aofClosePipes();
+    aofRewriteBufferReset();
+    server.aof_child_pid = -1;
+    server.aof_rewrite_time_last = time(NULL)-server.aof_rewrite_time_start;
+    server.aof_rewrite_time_start = -1;
+    if (server.aof_state == REDIS_AOF_WAIT_REWRITE) {
+        server.aof_rewrite_scheduled = 1;
+    }
+}
+
+void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
+    if (!server.aof_proxy_to_host) {
+        backgroundLocalRewriteDoneHandler(exitcode, bysignal);
+    } else {
+        backgroundProxyRewriteDoneHandler(exitcode, bysignal);
+    }
+}
+
+void aof2proxyCommand(redisClient *c) {
+    char *host;
+    long port;
+    if (c->argc == 3) {
+        host = c->argv[1]->ptr;
+        if ((getLongFromObjectOrReply(c, c->argv[2], &port, NULL) != REDIS_OK)) {
+            return;
+        }
+        sdsfree(server.aof_proxy_to_host);
+        server.aof_proxy_to_host = sdsnew(host);
+        server.aof_proxy_to_port = port;
+    }
+    addReplySds(c, sdscatprintf(sdsempty(), "+OK Aof proxy to: %s:%ld\r\n", server.aof_proxy_to_host,
+                                   server.aof_proxy_to_port));
+}
+
+void bufflushspanCommand(redisClient *c) {
+    long span;
+    if (c->argc == 2) {
+        if((getLongFromObjectOrReply(c, c->argv[1], &span, NULL) != REDIS_OK)) {
+            addReplyError(c, "invalid argument");
+            return;
+        }
+        server.aof_proxy_buf_flush_span = span;
+    }
+    addReplySds(c, sdscatprintf(sdsempty(), "+OK Aof proxy buf flush span: %d\r\n", server.aof_proxy_buf_flush_span));
+}
+
+void proxyrateCommand(redisClient *c) {
+    long rate;
+    if (c->argc == 2) {
+        if((getLongFromObjectOrReply(c, c->argv[1], &rate, NULL) != REDIS_OK)) {
+            addReplyError(c, "invalid argument");
+            return;
+        }
+        server.aof_proxy_rate = rate;
+    }
+    addReplySds(c, sdscatprintf(sdsempty(), "+OK Aof proxy rate: %d\r\n", server.aof_proxy_rate));
+}
+
+void proxybackendCommand(redisClient *c) {
+    long type;
+    if (c->argc == 2) {
+        if((getLongFromObjectOrReply(c, c->argv[1], &type, NULL) != REDIS_OK)) {
+            addReplyError(c, "invalid argument");
+            return;
+        }
+        server.aof_proxy_backend_type = (int)type;
+    }
+    addReplySds(c, sdscatprintf(sdsempty(), "+OK Aof proxy backend: %d\r\n", server.aof_proxy_backend_type));
+}
+

@@ -283,7 +283,11 @@ struct redisCommand redisCommandTable[] = {
     {"pfcount",pfcountCommand,-2,"r",0,NULL,1,-1,1,0,0},
     {"pfmerge",pfmergeCommand,-2,"wm",0,NULL,1,-1,1,0,0},
     {"pfdebug",pfdebugCommand,-3,"w",0,NULL,0,0,0,0,0},
-    {"latency",latencyCommand,-2,"arslt",0,NULL,0,0,0,0,0}
+    {"latency",latencyCommand,-2,"arslt",0,NULL,0,0,0,0,0},
+    {"slot2node",slot2nodeCommand,-1,"m",0,NULL,0,0,0,0,0},
+    {"aof2proxy",aof2proxyCommand,-1,"m",0,NULL,0,0,0,0,0},
+    {"bufflushspan",bufflushspanCommand,-1,"m",0,NULL,0,0,0,0,0},
+    {"proxyrate",proxyrateCommand,-1,"m",0,NULL,0,0,0,0,0}
 };
 
 struct evictionPoolEntry *evictionPoolAlloc(void);
@@ -375,6 +379,52 @@ void redisLogFromHandler(int level, const char *msg) {
     if (write(fd,"\n",1) == -1) goto err;
 err:
     if (!log_to_stdout) close(fd);
+}
+
+void redisKeyLogRaw(int level, const char *msg) {
+    const char *c = ".-*#";
+    FILE *fp;
+    char buf[64];
+    int rawmode = (level & REDIS_LOG_RAW);
+
+    level &= 0xff;
+    if (level < server.verbosity) {
+        return;
+    }
+
+    pthread_mutex_lock(&server.keylog_mutex);
+    fp = fopen(server.keylog_filename, "a");
+    if (!fp) {
+        pthread_mutex_unlock(&server.keylog_mutex);
+        redisLog(REDIS_WARNING, "Can't open key log file: %s", server.keylog_filename);
+        return;
+    }
+
+    if (rawmode) {
+        fprintf(fp, "%s", msg);
+    } else {
+        int off;
+        struct timeval tv;
+
+        gettimeofday(&tv,NULL);
+        off = strftime(buf,sizeof(buf),"%d %b %H:%M:%S.",localtime(&tv.tv_sec));
+        snprintf(buf+off,sizeof(buf)-off,"%03d",(int)tv.tv_usec/1000);
+        fprintf(fp,"[%d] %s %c %s\n",(int)getpid(),buf,c[level],msg);
+    }
+    fflush(fp);
+    fclose(fp);
+    pthread_mutex_unlock(&server.keylog_mutex);
+}
+
+void redisKeyLog(int level, const char *fmt, ...) {
+    va_list ap;
+    char msg[REDIS_MAX_KEYLOGMSG_LEN];
+
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    redisKeyLogRaw(level, msg);
 }
 
 /* Return the UNIX time in microseconds */
@@ -1557,6 +1607,15 @@ void initServerConfig(void) {
     server.assert_line = 0;
     server.bug_report_start = 0;
     server.watchdog_period = 0;
+
+    server.aof_proxy_backend_type = 1;// aof proxy
+    server.aof_proxy_check = 0;
+    server.aof_proxy_timeout = 1000;
+    server.aof_proxy_select_db = 0;
+    server.aof_proxy_max_key_len = REDIS_DEFAULT_AOF_PROXY_MAX_KEY_LENGTH;
+    server.aof_proxy_rate = REDIS_DEFAULT_AOF_PROXY_RATE;
+    server.keylog_filename = zstrdup(REDIS_DEFAULT_KEYLOG_FILENAME);
+    pthread_mutex_init(&server.keylog_mutex, NULL);
 }
 
 /* This function will try to raise the max number of open files accordingly to
