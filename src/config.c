@@ -479,6 +479,10 @@ void loadServerConfigFromString(char *config) {
                 err = "cluster slave validity factor must be zero or positive";
                 goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"cluster-reconfigure") && argc == 2) {
+            if ((server.cluster_reconfigure = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"lua-time-limit") && argc == 2) {
             server.lua_time_limit = strtoll(argv[1],NULL,10);
         } else if (!strcasecmp(argv[0],"slowlog-log-slower-than") &&
@@ -716,6 +720,14 @@ void configSetCommand(redisClient *c) {
             server.aof_fsync = AOF_FSYNC_EVERYSEC;
         } else if (!strcasecmp(o->ptr,"always")) {
             server.aof_fsync = AOF_FSYNC_ALWAYS;
+        } else {
+            goto badfmt;
+        }
+    } else if (!strcasecmp(c->argv[2]->ptr,"cluster-reconfigure")) {
+        if (!strcasecmp(o->ptr,"no")) {
+            server.cluster_reconfigure = 0;
+        } else if (!strcasecmp(o->ptr,"yes")) {
+            server.cluster_reconfigure = 1;
         } else {
             goto badfmt;
         }
@@ -1121,6 +1133,8 @@ void configGetCommand(redisClient *c) {
             server.aof_rewrite_incremental_fsync);
     config_get_bool_field("aof-load-truncated",
             server.aof_load_truncated);
+    config_get_bool_field("cluster-reconfigure",
+            server.cluster_reconfigure);
 
     /* Everything we can't handle with macros follows. */
 
@@ -1878,6 +1892,7 @@ int rewriteConfig(char *path) {
     rewriteConfigNumericalOption(state,"cluster-node-timeout",server.cluster_node_timeout,REDIS_CLUSTER_DEFAULT_NODE_TIMEOUT);
     rewriteConfigNumericalOption(state,"cluster-migration-barrier",server.cluster_migration_barrier,REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER);
     rewriteConfigNumericalOption(state,"cluster-slave-validity-factor",server.cluster_slave_validity_factor,REDIS_CLUSTER_DEFAULT_SLAVE_VALIDITY);
+    rewriteConfigYesNoOption(state,"cluster-reconfigure",server.cluster_reconfigure,1);
     rewriteConfigNumericalOption(state,"slowlog-log-slower-than",server.slowlog_log_slower_than,REDIS_SLOWLOG_LOG_SLOWER_THAN);
     rewriteConfigNumericalOption(state,"latency-monitor-threshold",server.latency_monitor_threshold,REDIS_DEFAULT_LATENCY_MONITOR_THRESHOLD);
     rewriteConfigNumericalOption(state,"slowlog-max-len",server.slowlog_max_len,REDIS_SLOWLOG_MAX_LEN);
