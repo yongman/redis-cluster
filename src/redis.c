@@ -2410,8 +2410,8 @@ int prepareForShutdown(int flags) {
             /* If we have AOF enabled but haven't written the AOF yet, don't
              * shutdown or else the dataset will be lost. */
             if (server.aof_state == REDIS_AOF_WAIT_REWRITE) {
-                redisLog(REDIS_WARNING, "Writing initial AOF, can't exit.");
-                return REDIS_ERR;
+                redisLog(REDIS_WARNING, "Writing initial AOF, force exit.");
+                //return REDIS_ERR;
             }
             redisLog(REDIS_WARNING,
                 "There is a child rewriting the AOF. Killing it!");
