@@ -556,7 +556,7 @@ void loadServerConfigFromString(char *config) {
             server.aof_proxy_rate = atoi(argv[1]);
         }else if (!strcasecmp(argv[0], "aof-proxy-buf-flush-span") && argc == 2) {
             server.aof_proxy_buf_flush_span = atoi(argv[1]);
-        }else if (!strcasecmp(argv[0],"aof-proxy-keylogfilenanme") && argc == 2) {
+        }else if (!strcasecmp(argv[0],"aof-proxy-keylogfilename") && argc == 2) {
             zfree(server.keylog_filename);
             server.keylog_filename = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0], "aof-proxy-max-key-len") && argc == 2) {
