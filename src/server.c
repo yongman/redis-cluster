@@ -2741,6 +2741,51 @@ void bytesToHuman(char *s, unsigned long long n) {
     }
 }
 
+/* Short version of INFO */
+sds genRedisInfoSummaryString() {
+    sds info = sdsempty();
+    size_t zmalloc_used = zmalloc_used_memory();
+    long long keys, vkeys;
+    long long repl_offset = -1;
+
+    /* Only care about db0 */
+    keys = dictSize(server.db[0].dict);
+    vkeys = dictSize(server.db[0].expires);
+
+    if (server.masterhost) {
+        if (server.master)
+            repl_offset = server.master->reploff;
+        else if (server.cached_master)
+            repl_offset = server.cached_master->reploff;
+    } else {
+        repl_offset = server.master_repl_offset;
+    }
+
+    info = sdscatprintf(info, 
+        "# used_memory:%zu\r\n"
+        "# db0_keys:%lld\r\n"
+        "# db0_expires:%lld\r\n"
+        "# master_link_status:%s\r\n"
+        "# master_sync_left_bytes:%lld\r\n"
+        "# repl_offset:%lld\r\n"
+        "# loading:%d\r\n"
+        "# rdb_bgsave_in_progress:%d\r\n"
+        "# instantaneous_ops_per_sec:%lld\r\n"
+        "# instantaneous_input_kbps:%.2f\r\n"
+        "# instantaneous_output_kbps:%.2f\r\n",
+        zmalloc_used,
+        keys,
+        vkeys,
+        (server.repl_state == REPL_STATE_CONNECTED) ? "up" : "down",
+        (long long)(server.repl_transfer_size - server.repl_transfer_read),
+        repl_offset,
+        server.loading,
+        server.rdb_child_pid != -1,
+        getInstantaneousMetric(STATS_METRIC_COMMAND),
+        (float)getInstantaneousMetric(STATS_METRIC_NET_INPUT)/1024,
+        (float)getInstantaneousMetric(STATS_METRIC_NET_OUTPUT)/1024);
+    return info;
+}
 /* Create the string returned by the INFO command. This is decoupled
  * by the INFO command itself as we need to report the same information
  * on memory corruption problems. */

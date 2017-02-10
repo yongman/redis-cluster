@@ -102,6 +102,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_DEFAULT_REPL_TIMEOUT 60
 #define CONFIG_DEFAULT_REPL_PING_SLAVE_PERIOD 10
 #define CONFIG_RUN_ID_SIZE 40
+#define CONFIG_TAG_STR_LEN 32
 #define RDB_EOF_MARK_SIZE 40
 #define CONFIG_DEFAULT_REPL_BACKLOG_SIZE (1024*1024)    /* 1mb */
 #define CONFIG_DEFAULT_REPL_BACKLOG_TIME_LIMIT (60*60)  /* 1 hour */
@@ -877,6 +878,7 @@ struct redisServer {
     list *loadmodule_queue;     /* List of modules to load at startup. */
     /* Networking */
     int port;                   /* TCP listening port */
+    char tag[CONFIG_TAG_STR_LEN];/* Redis tag */
     int tcp_backlog;            /* TCP listen() backlog */
     char *bindaddr[CONFIG_BINDADDR_MAX]; /* Addresses we should bind to */
     int bindaddr_count;         /* Number of addresses in server.bindaddr[] */
@@ -1293,6 +1295,7 @@ uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
 void exitFromChild(int retcode);
 size_t redisPopcount(void *s, long count);
 void redisSetProcTitle(char *title);
+sds genRedisInfoSummaryString();
 
 /* networking.c -- Networking and Client related operations */
 client *createClient(int fd);

@@ -260,6 +260,11 @@ void loadServerConfigFromString(char *config) {
                     argv[1], strerror(errno));
                 exit(1);
             }
+        } else if (!strcasecmp(argv[0],"tag") && argc == 2) {
+            if (strlen(argv[1]) >= CONFIG_TAG_STR_LEN) {
+                err = "Tag too long"; goto loaderr;
+            }
+            strncpy(server.tag, argv[1], CONFIG_TAG_STR_LEN);
         } else if (!strcasecmp(argv[0],"loglevel") && argc == 2) {
             server.verbosity = configEnumGetValue(loglevel_enum,argv[1]);
             if (server.verbosity == INT_MIN) {
@@ -927,6 +932,15 @@ void configSetCommand(client *c) {
         if (chdir((char*)o->ptr) == -1) {
             addReplyErrorFormat(c,"Changing directory: %s", strerror(errno));
             return;
+        }
+	} config_set_special_field("tag") {
+		if (strlen((char*)o->ptr) >= CONFIG_TAG_STR_LEN) {
+            addReplyErrorFormat(c,"Tag name too long, max: %d", CONFIG_TAG_STR_LEN-1);
+            return;
+        }
+        strncpy(server.tag,(char*)o->ptr,CONFIG_TAG_STR_LEN);
+        if (server.cluster_enabled) {
+            clusterSetNodeTag(server.cluster->myself,server.tag);
         }
     } config_set_special_field("client-output-buffer-limit") {
         int vlen, j;
