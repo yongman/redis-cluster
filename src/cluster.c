@@ -1210,6 +1210,11 @@ void markNodeAsFailingIfNeeded(clusterNode *node) {
     int failures;
     int needed_quorum = (server.cluster->size / 2) + 1;
 
+    /* If auto failover not enabled, PFAIL->FAIL switch will never happen. */
+    if (!server.cluster_autofailover) {
+        return;
+    }
+
     if (!nodeTimedOut(node)) return; /* We can reach it. */
     if (nodeFailed(node)) return; /* Already FAILing. */
 

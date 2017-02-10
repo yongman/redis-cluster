@@ -148,6 +148,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_BINDADDR_MAX 16
 #define CONFIG_MIN_RESERVED_FDS 32
 #define CONFIG_DEFAULT_LATENCY_MONITOR_THRESHOLD 0
+#define CONFIG_DEFAULT_CLUSTER_AUTOFAILOVER 0
 #define CONFIG_DEFAULT_SLAVE_LAZY_FLUSH 0
 #define CONFIG_DEFAULT_LAZYFREE_LAZY_EVICTION 0
 #define CONFIG_DEFAULT_LAZYFREE_LAZY_EXPIRE 0
@@ -1127,6 +1128,7 @@ struct redisServer {
                                    xor of NOTIFY_... flags. */
     /* Cluster */
     int cluster_enabled;      /* Is cluster enabled? */
+    int cluster_autofailover; /* Is autofailover enabled? */
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
     struct clusterState *cluster;  /* State of the cluster */
