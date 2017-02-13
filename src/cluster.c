@@ -56,7 +56,7 @@ void clusterSendFail(char *nodename);
 void clusterSendFailoverAuthIfNeeded(clusterNode *node, clusterMsg *request);
 void clusterUpdateState(void);
 int clusterNodeGetSlotBit(clusterNode *n, int slot);
-sds clusterGenNodesDescription(int filter, int extra);
+sds clusterGenNodesDescription(int filter, int extra, char *region);
 clusterNode *clusterLookupNode(char *name);
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave);
 int clusterAddSlot(clusterNode *n, int slot);
@@ -315,7 +315,7 @@ int clusterSaveConfig(int do_fsync) {
 
     /* Get the nodes description and concatenate our "vars" directive to
      * save currentEpoch and lastVoteEpoch. */
-    ci = clusterGenNodesDescription(CLUSTER_NODE_HANDSHAKE, 0);
+    ci = clusterGenNodesDescription(CLUSTER_NODE_HANDSHAKE, 0, NULL);
     ci = sdscatprintf(ci,"vars currentEpoch %llu lastVoteEpoch %llu\n",
         (unsigned long long) server.cluster->currentEpoch,
         (unsigned long long) server.cluster->lastVoteEpoch);
@@ -714,7 +714,7 @@ void nodeUpdateMode(clusterNode *node, uint16_t mode, uint64_t metaVersion) {
         node->mode = mode;
         node->metaVersion = metaVersion;
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-    } else if (metaVersion == node->metaVersion && mode != node->mode) {
+    } else if (metaVersion == node->metaVersion && mode != node->mode && node == myself) {
         /* Handle confliction, just random increase metaVersion for the next merging */
         node->metaVersion += random() % 5;
     }
@@ -729,8 +729,8 @@ void nodeUpdateTag(clusterNode *node, char *tag, uint64_t metaVersion) {
                  node->name, node->tag, tag);
         clusterSetNodeTag(node, tag);
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-    } else if (metaVersion == node->metaVersion && 
-               strncmp(node->tag,tag,CONFIG_TAG_STR_LEN) != 0) {
+    } else if (metaVersion == node->metaVersion &&
+               strncmp(node->tag,tag,CONFIG_TAG_STR_LEN) != 0 && node == myself) {
         /* Handle confliction, just random increase metaVersion for the next merging */
         serverLog(LL_NOTICE, "Random incr mode version of %.40s ('%.32s' -> '%.32s')", node->name, node->tag, tag);
         node->metaVersion += random() % 5;
@@ -1599,7 +1599,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
      *    master.
      * 2) We are a slave and our master is left without slots. We need
      *    to replicate to the new slots owner. */
-    if (newmaster && curmaster->numslots == 0) {
+    if (newmaster && curmaster->numslots == 0 && server.cluster_reconfigure) {
         serverLog(LL_WARNING,
             "Configuration change detected. Reconfiguring myself "
             "as a replica of %.40s", sender->name);
@@ -3939,7 +3939,7 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
  * The representation obtained using this function is used for the output
  * of the CLUSTER NODES function, and as format for the cluster
  * configuration file (nodes.conf) for a given node. */
-sds clusterGenNodesDescription(int filter, int extra) {
+sds clusterGenNodesDescription(int filter, int extra, char *region) {
     sds ci = sdsempty(), ni;
     dictIterator *di;
     dictEntry *de;
@@ -3953,6 +3953,17 @@ sds clusterGenNodesDescription(int filter, int extra) {
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
+		if (region) {
+            char *pch;
+            pch = strchr(node->tag,':');
+            if (pch && strncmp(region,node->tag,pch - node->tag) != 0) {
+                continue;
+            }
+            if (pch && strlen(region) != (unsigned)(pch - node->tag)) {
+                continue;
+            }
+        }
+
 
         if (node->flags & filter) continue;
         ni = clusterGenNodeDescription(node, extra);
@@ -4089,10 +4100,15 @@ void clusterCommand(client *c) {
             addReply(c,shared.ok);
         }
     } else if (!strcasecmp(c->argv[1]->ptr,"nodes") &&
-				(c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
+				(c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")) ||
+				(c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
         /* CLUSTER NODES */
         robj *o;
-        sds ci = clusterGenNodesDescription(0,c->argc-2);
+		char *region = NULL;
+		if (c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")) {
+            region = c->argv[3]->ptr;
+        }
+        sds ci = clusterGenNodesDescription(0,c->argc-2,region);
 
         o = createObject(OBJ_STRING,ci);
         addReplyBulk(c,o);

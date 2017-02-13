@@ -1397,6 +1397,7 @@ void initServerConfig(void) {
     server.hll_sparse_max_bytes = CONFIG_DEFAULT_HLL_SPARSE_MAX_BYTES;
     server.shutdown_asap = 0;
     server.cluster_enabled = 0;
+    server.cluster_reconfigure = 1;
     server.cluster_autofailover = CONFIG_DEFAULT_CLUSTER_AUTOFAILOVER;
     server.cluster_node_timeout = CLUSTER_DEFAULT_NODE_TIMEOUT;
     server.cluster_migration_barrier = CLUSTER_DEFAULT_MIGRATION_BARRIER;

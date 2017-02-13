@@ -1128,6 +1128,7 @@ struct redisServer {
                                    xor of NOTIFY_... flags. */
     /* Cluster */
     int cluster_enabled;      /* Is cluster enabled? */
+    int cluster_reconfigure;
     int cluster_autofailover; /* Is autofailover enabled? */
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */

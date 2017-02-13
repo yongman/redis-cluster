@@ -593,6 +593,10 @@ void loadServerConfigFromString(char *config) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
             server.cluster_autofailover = yn;
+        } else if (!strcasecmp(argv[0],"cluster-reconfigure") && argc == 2) {
+            if ((server.cluster_reconfigure = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"cluster-config-file") && argc == 2) {
             zfree(server.cluster_configfile);
             server.cluster_configfile = zstrdup(argv[1]);
@@ -1131,6 +1135,8 @@ void configSetCommand(client *c) {
       "cluster-announce-bus-port",server.cluster_announce_bus_port,0,65535) {
     } config_set_numerical_field(
       "cluster-migration-barrier",server.cluster_migration_barrier,0,LLONG_MAX){
+	} config_set_bool_field(
+	  "cluster-reconfigure",server.cluster_reconfigure) {
     } config_set_numerical_field(
       "cluster-slave-validity-factor",server.cluster_slave_validity_factor,0,LLONG_MAX) {
     } config_set_numerical_field(
@@ -1301,6 +1307,8 @@ void configGetCommand(client *c) {
     /* Bool (yes/no) values */
     config_get_bool_field("cluster-require-full-coverage",
             server.cluster_require_full_coverage);
+    config_get_bool_field("cluster-reconfigure",
+            server.cluster_reconfigure);
     config_get_bool_field("no-appendfsync-on-rewrite",
             server.aof_no_fsync_on_rewrite);
     config_get_bool_field("slave-serve-stale-data",
@@ -2028,6 +2036,7 @@ int rewriteConfig(char *path) {
     rewriteConfigBytesOption(state,"auto-aof-rewrite-min-size",server.aof_rewrite_min_size,AOF_REWRITE_MIN_SIZE);
     rewriteConfigNumericalOption(state,"lua-time-limit",server.lua_time_limit,LUA_SCRIPT_TIME_LIMIT);
     rewriteConfigYesNoOption(state,"cluster-enabled",server.cluster_enabled,0);
+    rewriteConfigYesNoOption(state,"cluster-reconfigure",server.cluster_reconfigure,1);
     rewriteConfigYesNoOption(state,"cluster-autofailover",server.cluster_autofailover,CONFIG_DEFAULT_CLUSTER_AUTOFAILOVER);
     rewriteConfigStringOption(state,"cluster-config-file",server.cluster_configfile,CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
     rewriteConfigYesNoOption(state,"cluster-require-full-coverage",server.cluster_require_full_coverage,CLUSTER_DEFAULT_REQUIRE_FULL_COVERAGE);
