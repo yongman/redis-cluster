@@ -3867,11 +3867,10 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
     }
 
     /* Node coordinates */
-    ci = sdscatprintf(ci,"%.40s %s:%d@%d ",
+    ci = sdscatprintf(ci,"%.40s %s:%d ",
         node->name,
         node->ip,
-        node->port,
-        node->cport);
+        node->port);
 
     /* Flags */
     ci = representClusterNodeFlags(ci, node->flags);
