@@ -1893,12 +1893,12 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+    bioInit();
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
     scriptingInit(1);
     slowlogInit();
     latencyMonitorInit();
-    bioInit();
     server.initial_memory_usage = zmalloc_used_memory();
 }
 

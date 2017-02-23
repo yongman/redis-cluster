@@ -59,6 +59,7 @@
 
 
 #include "server.h"
+#include "cluster.h"
 #include "bio.h"
 
 static pthread_t bio_threads[BIO_NUM_OPS];
@@ -199,6 +200,8 @@ void *bioProcessBackgroundJobs(void *arg) {
                 lazyfreeFreeDatabaseFromBioThread(job->arg2,job->arg3);
             else if (job->arg3)
                 lazyfreeFreeSlotsMapFromBioThread(job->arg3);
+        } else if (type == BIO_SLOTS_RANGE) {
+            clusterGenNodesSlotsRange();
         } else {
             serverPanic("Wrong job type in bioProcessBackgroundJobs().");
         }

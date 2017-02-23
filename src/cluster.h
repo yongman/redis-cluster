@@ -78,6 +78,8 @@ typedef struct clusterLink {
 #define CLUSTER_CANT_FAILOVER_WAITING_VOTES 4
 #define CLUSTER_CANT_FAILOVER_RELOG_PERIOD (60*5) /* seconds. */
 
+#include <pthread.h>
+
 /* This structure represent elements of node->fail_reports. */
 typedef struct clusterNodeFailReport {
     struct clusterNode *node;  /* Node reporting the failure condition. */
@@ -112,6 +114,7 @@ typedef struct clusterNode {
     int cport;                  /* Latest known cluster port of this node. */
     clusterLink *link;          /* TCP/IP link with this node */
     list *fail_reports;         /* List of nodes signaling this as failing */
+    sds slots_range[2];         /* Slots served by this node, with string format */
 } clusterNode;
 
 typedef struct clusterState {
@@ -120,6 +123,7 @@ typedef struct clusterState {
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */
     int size;             /* Num of master nodes with at least one slot */
     dict *nodes;          /* Hash table of name -> clusterNode structures */
+    pthread_mutex_t nodes_mutex;
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
     clusterNode *migrating_slots_to[CLUSTER_SLOTS];
     clusterNode *importing_slots_from[CLUSTER_SLOTS];
@@ -148,6 +152,7 @@ typedef struct clusterState {
     int todo_before_sleep; /* Things to do in clusterBeforeSleep(). */
     long long stats_bus_messages_sent;  /* Num of msg sent via cluster bus. */
     long long stats_bus_messages_received; /* Num of msg rcvd via cluster bus.*/
+    pthread_mutex_t slots_range_mutex;
 } clusterState;
 
 /* clusterState todo_before_sleep flags. */
@@ -274,5 +279,5 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
 int clusterRedirectBlockedClientIfNeeded(client *c);
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code);
 void clusterSetNodeTag(clusterNode *node, const char *tag);
-
+void clusterGenNodesSlotsRange();
 #endif /* __CLUSTER_H */

@@ -31,6 +31,7 @@
 #include "server.h"
 #include "cluster.h"
 #include "endianconv.h"
+#include "bio.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -56,7 +57,7 @@ void clusterSendFail(char *nodename);
 void clusterSendFailoverAuthIfNeeded(clusterNode *node, clusterMsg *request);
 void clusterUpdateState(void);
 int clusterNodeGetSlotBit(clusterNode *n, int slot);
-sds clusterGenNodesDescription(int filter, int extra, char *region);
+sds clusterGenNodesDescription(int filter, int extra, char *region, int async);
 clusterNode *clusterLookupNode(char *name);
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave);
 int clusterAddSlot(clusterNode *n, int slot);
@@ -77,6 +78,8 @@ sds representClusterNodeFlags(sds ci, uint16_t flags);
 uint64_t clusterGetMaxEpoch(void);
 int clusterBumpConfigEpochWithoutConsensus(void);
 void clusterSetNodeTag(clusterNode *node, const char * tag);
+void clusterGenNodeSlotsRange(clusterNode *node);
+void cluster_background_slots();
 
 /* -----------------------------------------------------------------------------
  * Initialization
@@ -315,7 +318,8 @@ int clusterSaveConfig(int do_fsync) {
 
     /* Get the nodes description and concatenate our "vars" directive to
      * save currentEpoch and lastVoteEpoch. */
-    ci = clusterGenNodesDescription(CLUSTER_NODE_HANDSHAKE, 0, NULL);
+
+    ci = clusterGenNodesDescription(CLUSTER_NODE_HANDSHAKE, 0, NULL, 0);
     ci = sdscatprintf(ci,"vars currentEpoch %llu lastVoteEpoch %llu\n",
         (unsigned long long) server.cluster->currentEpoch,
         (unsigned long long) server.cluster->lastVoteEpoch);
@@ -428,6 +432,8 @@ void clusterInit(void) {
     server.cluster->stats_bus_messages_received = 0;
     memset(server.cluster->slots,0, sizeof(server.cluster->slots));
     clusterCloseAllSlots();
+    server.cluster->nodes_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    server.cluster->slots_range_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 
     /* Lock the cluster config file to make sure every node uses
      * its own nodes.conf. */
@@ -546,7 +552,11 @@ void clusterReset(int hard) {
         /* To change the Node ID we need to remove the old name from the
          * nodes table, change the ID, and re-add back with new name. */
         oldname = sdsnewlen(myself->name, CLUSTER_NAMELEN);
+
+        pthread_mutex_lock(&server.cluster->nodes_mutex);
         dictDelete(server.cluster->nodes,oldname);
+        pthread_mutex_unlock(&server.cluster->nodes_mutex);
+
         sdsfree(oldname);
         getRandomHexChars(myself->name, CLUSTER_NAMELEN);
         clusterAddNode(myself);
@@ -699,6 +709,8 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->repl_offset_time = 0;
     node->repl_offset = 0;
     listSetFreeMethod(node->fail_reports,zfree);
+    node->slots_range[0] = NULL;
+    node->slots_range[1] = NULL;
     return node;
 }
 
@@ -888,7 +900,11 @@ void freeClusterNode(clusterNode *n) {
 
     /* Unlink from the set of nodes. */
     nodename = sdsnewlen(n->name, CLUSTER_NAMELEN);
+
+    pthread_mutex_lock(&server.cluster->nodes_mutex);
     serverAssert(dictDelete(server.cluster->nodes,nodename) == DICT_OK);
+    pthread_mutex_unlock(&server.cluster->nodes_mutex);
+
     sdsfree(nodename);
 
     /* Release link and associated data structures. */
@@ -902,8 +918,11 @@ void freeClusterNode(clusterNode *n) {
 int clusterAddNode(clusterNode *node) {
     int retval;
 
+    pthread_mutex_lock(&server.cluster->nodes_mutex);
     retval = dictAdd(server.cluster->nodes,
             sdsnewlen(node->name,CLUSTER_NAMELEN), node);
+    pthread_mutex_unlock(&server.cluster->nodes_mutex);
+
     return (retval == DICT_OK) ? C_OK : C_ERR;
 }
 
@@ -968,7 +987,9 @@ void clusterRenameNode(clusterNode *node, char *newname) {
 
     serverLog(LL_DEBUG,"Renaming node %.40s into %.40s",
         node->name, newname);
+    pthread_mutex_lock(&server.cluster->nodes_mutex);
     retval = dictDelete(server.cluster->nodes, s);
+    pthread_mutex_unlock(&server.cluster->nodes_mutex);
     sdsfree(s);
     serverAssert(retval == DICT_OK);
     memcpy(node->name, newname, CLUSTER_NAMELEN);
@@ -3847,11 +3868,15 @@ sds representClusterNodeFlags(sds ci, uint16_t flags) {
     return ci;
 }
 
+void cluster_background_slots() {
+    bioCreateBackgroundJob(BIO_SLOTS_RANGE,NULL,NULL,NULL);
+}
+
 /* Generate a csv-alike representation of the specified cluster node.
  * See clusterGenNodesDescription() top comment for more information.
  *
  * The function returns the string representation as an SDS string. */
-sds clusterGenNodeDescription(clusterNode *node, int extra) {
+sds clusterGenNodeDescription(clusterNode *node, int extra, int async) {
     int j, start;
 	sds ci = sdsempty();
 
@@ -3890,22 +3915,29 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
                     "connected" : "disconnected");
 
     /* Slots served by this instance */
-    start = -1;
-    for (j = 0; j < CLUSTER_SLOTS; j++) {
-        int bit;
+    if (async) {
+        pthread_mutex_lock(&server.cluster->slots_range_mutex);
+        if (node->slots_range[1])
+            ci = sdscatsds(ci,node->slots_range[1]);
+        pthread_mutex_unlock(&server.cluster->slots_range_mutex);
+    } else {
+        start = -1;
+        for (j = 0; j < CLUSTER_SLOTS; j++) {
+            int bit;
 
-        if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
-            if (start == -1) start = j;
-        }
-        if (start != -1 && (!bit || j == CLUSTER_SLOTS-1)) {
-            if (bit && j == CLUSTER_SLOTS-1) j++;
-
-            if (start == j-1) {
-                ci = sdscatprintf(ci," %d",start);
-            } else {
-                ci = sdscatprintf(ci," %d-%d",start,j-1);
+            if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
+                if (start == -1) start = j;
             }
-            start = -1;
+            if (start != -1 && (!bit || j == CLUSTER_SLOTS-1)) {
+                if (bit && j == CLUSTER_SLOTS-1) j++;
+
+                if (start == j-1) {
+                    ci = sdscatprintf(ci," %d",start);
+                } else {
+                    ci = sdscatprintf(ci," %d-%d",start,j-1);
+                }
+                start = -1;
+            }
         }
     }
 
@@ -3938,10 +3970,13 @@ sds clusterGenNodeDescription(clusterNode *node, int extra) {
  * The representation obtained using this function is used for the output
  * of the CLUSTER NODES function, and as format for the cluster
  * configuration file (nodes.conf) for a given node. */
-sds clusterGenNodesDescription(int filter, int extra, char *region) {
+sds clusterGenNodesDescription(int filter, int extra, char *region, int async) {
     sds ci = sdsempty(), ni;
     dictIterator *di;
     dictEntry *de;
+
+	if (async)
+        cluster_background_slots();
 
 	if (extra) {
         ni = genRedisInfoSummaryString();
@@ -3952,7 +3987,7 @@ sds clusterGenNodesDescription(int filter, int extra, char *region) {
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
-		if (region) {
+        if (region) {
             char *pch;
             pch = strchr(node->tag,':');
             if (pch && strncmp(region,node->tag,pch - node->tag) != 0) {
@@ -3965,13 +4000,79 @@ sds clusterGenNodesDescription(int filter, int extra, char *region) {
 
 
         if (node->flags & filter) continue;
-        ni = clusterGenNodeDescription(node, extra);
+        ni = clusterGenNodeDescription(node, extra, async);
         ci = sdscatsds(ci,ni);
         sdsfree(ni);
         ci = sdscatlen(ci,"\n",1);
     }
     dictReleaseIterator(di);
     return ci;
+}
+
+static void clusterNodeSlotsRangeExchange(clusterNode *node) {
+    sds tmp;
+
+    tmp = node->slots_range[0];
+    node->slots_range[0] = node->slots_range[1];
+    node->slots_range[1] = tmp;
+
+    sdsfree(node->slots_range[0]);
+    node->slots_range[0] = NULL;
+}
+
+void clusterGenNodesSlotsRange() {
+    dictIterator *di;
+    dictEntry *de;
+
+    pthread_mutex_lock(&server.cluster->nodes_mutex);
+    di = dictGetSafeIterator(server.cluster->nodes);
+    while((de = dictNext(di)) != NULL) {
+        clusterNode *node = dictGetVal(de);
+        clusterGenNodeSlotsRange(node);
+    }
+    dictReleaseIterator(di);
+    pthread_mutex_unlock(&server.cluster->nodes_mutex);
+
+    /* Exchange sds pointer */
+    pthread_mutex_lock(&server.cluster->slots_range_mutex);
+    pthread_mutex_lock(&server.cluster->nodes_mutex);
+
+    di = dictGetSafeIterator(server.cluster->nodes);
+    while((de = dictNext(di)) != NULL) {
+        clusterNode *node = dictGetVal(de);
+        clusterNodeSlotsRangeExchange(node);
+    }
+    dictReleaseIterator(di);
+
+    pthread_mutex_unlock(&server.cluster->nodes_mutex);
+    pthread_mutex_unlock(&server.cluster->slots_range_mutex);
+
+}
+
+void clusterGenNodeSlotsRange(clusterNode *node) {
+    int start,j;
+
+    node->slots_range[0] = sdsempty();
+
+    /* Slots served by this instance */
+    start = -1;
+    for (j = 0; j < CLUSTER_SLOTS; j++) {
+        int bit;
+
+        if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
+            if (start == -1) start = j;
+        }
+        if (start != -1 && (!bit || j == CLUSTER_SLOTS-1)) {
+            if (bit && j == CLUSTER_SLOTS-1) j++;
+
+            if (start == j-1) {
+                node->slots_range[0] = sdscatprintf(node->slots_range[0]," %d",start);
+            } else {
+                node->slots_range[0] = sdscatprintf(node->slots_range[0]," %d-%d",start,j-1);
+            }
+            start = -1;
+        }
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -4107,7 +4208,21 @@ void clusterCommand(client *c) {
 		if (c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")) {
             region = c->argv[3]->ptr;
         }
-        sds ci = clusterGenNodesDescription(0,c->argc-2,region);
+        sds ci = clusterGenNodesDescription(0,c->argc-2,region,1);
+
+        o = createObject(OBJ_STRING,ci);
+        addReplyBulk(c,o);
+        decrRefCount(o);
+    } else if (!strcasecmp(c->argv[1]->ptr,"nodes-async") &&
+				(c->argc == 2 || (c->argc == 3 && !strcasecmp(c->argv[2]->ptr,"extra")) ||
+				(c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")))) {
+        /* CLUSTER NODES */
+        robj *o;
+		char *region = NULL;
+		if (c->argc == 4 && !strcasecmp(c->argv[2]->ptr,"extra")) {
+            region = c->argv[3]->ptr;
+        }
+        sds ci = clusterGenNodesDescription(0,c->argc-2,region,1);
 
         o = createObject(OBJ_STRING,ci);
         addReplyBulk(c,o);
@@ -4473,7 +4588,7 @@ void clusterCommand(client *c) {
 
         addReplyMultiBulkLen(c,n->numslaves);
         for (j = 0; j < n->numslaves; j++) {
-            sds ni = clusterGenNodeDescription(n->slaves[j],0);
+            sds ni = clusterGenNodeDescription(n->slaves[j],0,0);
             addReplyBulkCString(c,ni);
             sdsfree(ni);
         }
