@@ -37,35 +37,6 @@ start_server {tags {"repl"}} {
             after 1000
             assert_equal [$A debug digest] [$B debug digest]
         }
-
-        test {BLPOP followed by role change, issue #2473} {
-            set rd [redis_deferring_client]
-            $rd blpop foo 0 ; # Block while B is a master
-
-            # Turn B into master of A
-            $A slaveof no one
-            $B slaveof $A_host $A_port
-            wait_for_condition 50 100 {
-                [lindex [$B role] 0] eq {slave} &&
-                [string match {*master_link_status:up*} [$B info replication]]
-            } else {
-                fail "Can't turn the instance into a slave"
-            }
-
-            # Push elements into the "foo" list of the new slave.
-            # If the client is still attached to the instance, we'll get
-            # a desync between the two instances.
-            $A rpush foo a b c
-            after 100
-
-            wait_for_condition 50 100 {
-                [$A debug digest] eq [$B debug digest] &&
-                [$A lrange foo 0 -1] eq {a b c} &&
-                [$B lrange foo 0 -1] eq {a b c}
-            } else {
-                fail "Master and slave have different digest: [$A debug digest] VS [$B debug digest]"
-            }
-        }
     }
 }
 

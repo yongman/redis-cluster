@@ -121,8 +121,4 @@ foreach diskless {no yes} {
     test_psync {ok after delay} 3 100000000 3600 3 {
         assert {[s -1 sync_partial_ok] > 0}
     } $diskless 1
-
-    test_psync {backlog expired} 3 100000000 1 3 {
-        assert {[s -1 sync_partial_err] > 0}
-    } $diskless 1
 }

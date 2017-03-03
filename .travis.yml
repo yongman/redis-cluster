@@ -1,0 +1,5 @@
+language: c
+os: linux
+sudo: required
+before_script: sudo apt-get install -qq tcl8.5
+script: make && make test
