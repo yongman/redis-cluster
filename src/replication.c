@@ -30,6 +30,7 @@
 
 
 #include "server.h"
+#include "cluster.h"
 
 #include <sys/time.h>
 #include <unistd.h>
@@ -189,6 +190,11 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
 
     /* We can't have slaves attached and no backlog. */
     serverAssert(!(listLength(slaves) != 0 && server.repl_backlog == NULL));
+
+	/* If client are paused for manual failover, do not feed backlog and slave */
+    /* this period will last for 10 seconds, (PING command also be blocked)
+    * please make sure replcation timeout larger than this value */
+    if (server.cluster_enabled && server.cluster->mf_end && server.clients_paused) return;
 
     /* Send SELECT command to every slave if needed. */
     if (server.slaveseldb != dictid) {
