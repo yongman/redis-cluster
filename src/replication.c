@@ -1782,6 +1782,8 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     if (psync_result == PSYNC_CONTINUE) {
         serverLog(LL_NOTICE, "MASTER <-> SLAVE sync: Master accepted a Partial Resynchronization.");
+        /* create backlog before psync begin */
+        if (server.repl_backlog == NULL) createReplicationBacklog();
         return;
     }
 
@@ -1948,6 +1950,11 @@ void replicationUnsetMaster(void) {
     if (server.masterhost == NULL) return; /* Nothing to do. */
     sdsfree(server.masterhost);
     server.masterhost = NULL;
+
+    /* Update replication no slave timestamp
+     * and avoid free replication backlog when role change from slave to master */
+    server.repl_no_slaves_since = server.unixtime;
+
     /* When a slave is turned into a master, the current replication ID
      * (that was inherited from the master at synchronization time) is
      * used as secondary ID up to the current offset, and a new replication
