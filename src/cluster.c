@@ -496,6 +496,10 @@ void clusterInit(void) {
     resetManualFailover();
 }
 
+void clusterReload() {
+    myself = server.cluster->myself;
+}
+
 /* Reset a node performing a soft or hard reset:
  *
  * 1) All other nodes are forget.

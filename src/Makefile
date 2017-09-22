@@ -201,7 +201,7 @@ $(REDIS_SERVER_SO): $(REDIS_SERVER_OBJ)
 	$(REDIS_LD) -shared -fPIC -o redis-server.so $(REDIS_SERVER_OBJ) -Wl,--whole-archive ../deps/lua/src/liblua.a -Wl,--no-whole-archive $(FINAL_LIBS)
 
 $(REDIS_SERVER_WRAP):
-	$(REDIS_CC) -rdynamic -o $(REDIS_SERVER_WRAP) $(REDIS_SERVER_WRAP).c -ldl -g
+	$(REDIS_CC) -rdynamic -o $(REDIS_SERVER_WRAP) $(REDIS_SERVER_WRAP).c -ldl -g -D_POSIX_C_SOURCE=199309L
 # redis-server
 $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
 	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a $(FINAL_LIBS)
@@ -236,7 +236,7 @@ dict-benchmark: dict.c zmalloc.c sds.c siphash.c
 	$(REDIS_CC) -c $<
 
 clean:
-	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(REDIS_SERVER_SO) *.o *.gcda *.gcno *.gcov redis.info lcov-html Makefile.dep dict-benchmark
+	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SERVER_WRAP) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(REDIS_SERVER_SO) *.o *.gcda *.gcno *.gcov redis.info lcov-html Makefile.dep dict-benchmark
 
 .PHONY: clean
 

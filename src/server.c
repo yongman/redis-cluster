@@ -1331,6 +1331,11 @@ void createSharedObjects(void) {
     shared.maxstring = sdsnew("maxstring");
 }
 
+
+void reloadSharedObjects(struct sharedObjectsStruct *s) {
+    shared = *s;
+}
+
 void initServerConfig(void) {
     int j;
 
@@ -1782,7 +1787,7 @@ void resetServerStats(void) {
     server.aof_delayed_fsync = 0;
 }
 
-void initServer(char *db) {
+void initServer() {
     int j;
 
     signal(SIGHUP, SIG_IGN);
@@ -1818,13 +1823,7 @@ void initServer(char *db) {
             strerror(errno));
         exit(1);
     }
-    if (db == NULL) {
-        server.db = zmalloc(sizeof(redisDb)*server.dbnum);
-        serverLog(LL_NOTICE, "db malloc, addr is 0x%x", server.db);
-    } else {
-        serverLog(LL_NOTICE, "db reuse, addr is 0x%x", db);
-        server.db = db;
-    }
+    server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
     if (server.port != 0 &&
@@ -1850,7 +1849,7 @@ void initServer(char *db) {
     }
 
     /* Create the Redis databases, and initialize other internal state. */
-    for (j = 0; j < server.dbnum && db == NULL; j++) {
+    for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
@@ -1952,6 +1951,30 @@ void initServer(char *db) {
     bioInit();
     server.initial_memory_usage = zmalloc_used_memory();
 }
+
+void reloadServer() {
+    //server = server_bak;
+
+    int j;
+
+    signal(SIGHUP, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);
+    setupSignalHandlers();
+
+    //reloadSharedObjects(sharedbak);
+    adjustOpenFilesLimit();
+
+
+    evictionPoolAlloc(); /* Initialize the LRU keys pool. */
+    aofRewriteBufferReset();
+
+    if (server.cluster_enabled) clusterReload();
+
+    scriptingInit(1);
+    bioKillThreads();
+    bioInit();
+}
+
 
 /* Populates the Redis Command Table starting from the hard coded list
  * we have on top of redis.c file. */
@@ -2580,6 +2603,73 @@ int prepareForShutdown(int flags) {
     return C_OK;
 }
 
+int prepareForReload(int flags) {
+    int save = flags & SHUTDOWN_SAVE;
+    int nosave = flags & SHUTDOWN_NOSAVE;
+
+    serverLog(LL_WARNING,"User requested reload...");
+
+    /* Kill all the Lua debugger forked sessions. */
+    ldbKillForkedSessions();
+
+    /* Kill the saving child if there is a background saving in progress.
+       We want to avoid race conditions, for instance our saving child may
+       overwrite the synchronous saving did by SHUTDOWN. */
+    if (server.rdb_child_pid != -1) {
+        serverLog(LL_WARNING,"There is a child saving an .rdb. Killing it!");
+        kill(server.rdb_child_pid,SIGUSR1);
+        rdbRemoveTempFile(server.rdb_child_pid);
+    }
+
+    if (server.aof_state != AOF_OFF) {
+        /* Kill the AOF saving child as the AOF we already have may be longer
+         * but contains the full dataset anyway. */
+        if (server.aof_child_pid != -1) {
+            /* If we have AOF enabled but haven't written the AOF yet, don't
+             * shutdown or else the dataset will be lost. */
+            if (server.aof_state == AOF_WAIT_REWRITE) {
+                serverLog(LL_WARNING, "Writing initial AOF, can't exit.");
+                return C_ERR;
+            }
+            serverLog(LL_WARNING,
+                "There is a child rewriting the AOF. Killing it!");
+            kill(server.aof_child_pid,SIGUSR1);
+        }
+        /* Append only file: flush buffers and fsync() the AOF at exit */
+        serverLog(LL_NOTICE,"Calling fsync() on the AOF file.");
+        flushAppendOnlyFile(1);
+        aof_fsync(server.aof_fd);
+    }
+
+    /* Create a new RDB file before exiting. */
+    if ((server.saveparamslen > 0 && !nosave) || save) {
+        serverLog(LL_NOTICE,"Saving the final RDB snapshot before exiting.");
+        /* Snapshotting. Perform a SYNC SAVE and exit */
+        if (rdbSave(server.rdb_filename,NULL) != C_OK) {
+            /* Ooops.. error saving! The best we can do is to continue
+             * operating. Note that if there was a background saving process,
+             * in the next cron() Redis will be notified that the background
+             * saving aborted, handling special stuff like slaves pending for
+             * synchronization... */
+            serverLog(LL_WARNING,"Error trying to save the DB, can't exit.");
+            return C_ERR;
+        }
+    }
+
+    /* Remove the pid file if possible and needed. */
+    if (server.daemonize || server.pidfile) {
+        serverLog(LL_NOTICE,"Removing the pid file.");
+        unlink(server.pidfile);
+    }
+
+    /* Best effort flush of slave output buffers, so that we hopefully
+     * send them pending writes. */
+    flushSlavesOutputBuffers();
+
+    serverLog(LL_WARNING,"%s is now ready to reload, see you later...",
+        server.sentinel_mode ? "Sentinel" : "Redis");
+    return C_OK;
+}
 /*================================== Commands =============================== */
 
 /* Return zero if strings are the same, non-zero if they are not.
@@ -3489,6 +3579,14 @@ static void sigShutdownHandler(int sig) {
     server.shutdown_asap = 1;
 }
 
+static void sigReloadHandler(int sig) {
+    serverLogFromHandler(LL_WARNING, "You insist... exiting loop now.");
+    server.el->stop = 1;
+
+    serverLogFromHandler(LL_WARNING, "Received SIGUSR1 signal...");
+    server.shutdown_asap = 1;
+}
+
 void setupSignalHandlers(void) {
     struct sigaction act;
 
@@ -3499,13 +3597,17 @@ void setupSignalHandlers(void) {
     act.sa_handler = sigShutdownHandler;
     sigaction(SIGTERM, &act, NULL);
     sigaction(SIGINT, &act, NULL);
+
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    act.sa_handler = sigReloadHandler;
     sigaction(SIGUSR1, &act, NULL);
 
 #ifdef HAVE_BACKTRACE
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_NODEFER | SA_RESETHAND | SA_SIGINFO;
     act.sa_sigaction = sigsegvHandler;
-    sigaction(SIGSEGV, &act, NULL);
+    //sigaction(SIGSEGV, &act, NULL);
     sigaction(SIGBUS, &act, NULL);
     sigaction(SIGFPE, &act, NULL);
     sigaction(SIGILL, &act, NULL);
@@ -3825,7 +3927,7 @@ int main(int argc, char **argv) {
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
-    initServer(NULL);
+    initServer();
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);
     redisAsciiArt();
@@ -3871,9 +3973,23 @@ char *getDb() {
     return server.db;
 }
 
-int server_run(int argc, char **argv, char *db, char *hashseed) {
+void serverSave(struct redisServer *s, struct sharedObjectsStruct *sos) {
+    memcpy(s, &server, sizeof(server));
+    memcpy(sos, &shared, sizeof(shared));
+}
+
+void serverRestore(struct redisServer *s, struct sharedObjectsStruct *sos) {
+    memcpy(&server, s, sizeof(server));
+    memcpy(&shared, sos, sizeof(shared));
+}
+
+int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjectsStruct * sos, int reload, char *hashseed) {
     struct timeval tv;
     int j;
+
+    if (reload) {
+        serverRestore(s, sos);
+    }
 
 #ifdef REDIS_TEST
     if (argc == 3 && !strcasecmp(argv[1], "test")) {
@@ -3921,8 +4037,8 @@ int server_run(int argc, char **argv, char *db, char *hashseed) {
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
     if (server.sentinel_mode) {
-        initSentinelConfig();
-        initSentinel();
+        fprintf(stderr, "sentinel dose not suppert in dynamic library mode");
+        exit(1);
     }
 
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
@@ -4019,7 +4135,11 @@ int server_run(int argc, char **argv, char *db, char *hashseed) {
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
-    initServer(db);
+    if (reload == 0) {
+        initServer();
+    } else {
+        reloadServer();
+    }
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);
     redisAsciiArt();
@@ -4032,7 +4152,7 @@ int server_run(int argc, char **argv, char *db, char *hashseed) {
         linuxMemoryWarnings();
     #endif
         moduleLoadFromQueue();
-        if (db == NULL) {
+        if (reload == 0) {
             loadDataFromDisk();
         }
         if (server.cluster_enabled) {
@@ -4059,7 +4179,11 @@ int server_run(int argc, char **argv, char *db, char *hashseed) {
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
     aeMain(server.el);
-    aeDeleteEventLoop(server.el);
+
+    // do not delete el
+    //aeDeleteEventLoop(server.el);
+    /* save server ctx to s */
+    serverSave(s, sos);
     return 0;
 }
 
