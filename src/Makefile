@@ -107,7 +107,7 @@ endif
 endif
 endif
 # Include paths to dependencies
-FINAL_CFLAGS+= -I../deps/hiredis -I../deps/linenoise -I../deps/lua/src
+FINAL_CFLAGS+= -I../deps/hiredis -I../deps/linenoise -I../deps/lua/src -fPIC
 
 ifeq ($(MALLOC),tcmalloc)
 	FINAL_CFLAGS+= -DUSE_TCMALLOC
@@ -142,6 +142,8 @@ QUIET_LINK = @printf '    %b %b\n' $(LINKCOLOR)LINK$(ENDCOLOR) $(BINCOLOR)$@$(EN
 QUIET_INSTALL = @printf '    %b %b\n' $(LINKCOLOR)INSTALL$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR) 1>&2;
 endif
 
+REDIS_SERVER_SO=redis-server.so
+REDIS_SERVER_WRAP=redis-server-wrap
 REDIS_SERVER_NAME=redis-server
 REDIS_SENTINEL_NAME=redis-sentinel
 REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o
@@ -152,7 +154,7 @@ REDIS_BENCHMARK_OBJ=ae.o anet.o redis-benchmark.o adlist.o zmalloc.o redis-bench
 REDIS_CHECK_RDB_NAME=redis-check-rdb
 REDIS_CHECK_AOF_NAME=redis-check-aof
 
-all: $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME)
+all: $(REDIS_SERVER_SO) $(REDIS_SERVER_WRAP) $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME)
 	@echo ""
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
@@ -194,6 +196,12 @@ ifneq ($(strip $(PREV_FINAL_LDFLAGS)), $(strip $(FINAL_LDFLAGS)))
 .make-prerequisites: persist-settings
 endif
 
+# redis-server.so
+$(REDIS_SERVER_SO): $(REDIS_SERVER_OBJ)
+	$(REDIS_LD) -shared -fPIC -o redis-server.so $(REDIS_SERVER_OBJ) -Wl,--whole-archive ../deps/lua/src/liblua.a -Wl,--no-whole-archive $(FINAL_LIBS)
+
+$(REDIS_SERVER_WRAP):
+	$(REDIS_CC) -rdynamic -o $(REDIS_SERVER_WRAP) $(REDIS_SERVER_WRAP).c -ldl -g
 # redis-server
 $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
 	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a $(FINAL_LIBS)
@@ -228,7 +236,7 @@ dict-benchmark: dict.c zmalloc.c sds.c siphash.c
 	$(REDIS_CC) -c $<
 
 clean:
-	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) *.o *.gcda *.gcno *.gcov redis.info lcov-html Makefile.dep dict-benchmark
+	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(REDIS_SERVER_SO) *.o *.gcda *.gcno *.gcov redis.info lcov-html Makefile.dep dict-benchmark
 
 .PHONY: clean
 

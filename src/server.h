@@ -1199,6 +1199,8 @@ struct redisServer {
     pthread_mutex_t lruclock_mutex;
     pthread_mutex_t next_client_id_mutex;
     pthread_mutex_t unixtime_mutex;
+
+    int exit_to_reload;
 };
 
 typedef struct pubsubPattern {

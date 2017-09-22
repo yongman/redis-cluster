@@ -114,7 +114,7 @@ AC_SUBST([XSLROOT])
 
 dnl If CFLAGS isn't defined, set CFLAGS to something reasonable.  Otherwise,
 dnl just prevent autoconf from molesting CFLAGS.
-CFLAGS=$CFLAGS
+CFLAGS=$CFLAGS -fPIC
 AC_PROG_CC
 if test "x$GCC" != "xyes" ; then
   AC_CACHE_CHECK([whether compiler is MSVC],
