@@ -883,6 +883,14 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
     sdsfree(code);
 }
 
+void ldbSetup(void) {
+    server.lua_client = NULL;
+    server.lua_caller = NULL;
+    server.lua_timedout = 0;
+    server.lua_always_replicate_commands = 0; /* Only DEBUG can change it.*/
+    ldbInit();
+}
+
 /* Initialize the scripting environment.
  *
  * This function is called the first time at server startup with
@@ -1501,6 +1509,12 @@ void ldbInit(void) {
     ldb.src = NULL;
     ldb.lines = 0;
     ldb.cbuf = sdsempty();
+}
+
+void ldbRelease(void) {
+    listRelease(ldb.logs);
+    listRelease(ldb.children);
+    sdsfree(ldb.cbuf);
 }
 
 /* Remove all the pending messages in the specified list. */

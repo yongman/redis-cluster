@@ -3628,6 +3628,16 @@ void moduleInitModulesSystem(void) {
     pthread_mutex_lock(&moduleGIL);
 }
 
+void moduleReloadModulesSystem(void) {
+    moduleUnblockedClients = listCreate();
+    modules = dictCreate(&modulesDictType,NULL);
+}
+
+void moduleDeinitModulesSystem(void) {
+    listRelease(moduleUnblockedClients);
+    dictRelease(modules);
+}
+
 /* Load all the modules in the server.loadmodule_queue list, which is
  * populated by `loadmodule` directives in the configuration file.
  * We can't load modules directly when processing the configuration file

@@ -92,6 +92,46 @@ void lazyfreeFreeSlotsMapFromBioThread(zskiplist *sl);
  * main thread. */
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
 
+void bioRestore(pthread_t *threads) {
+    int j;
+
+    memcpy(bio_threads, threads, sizeof(bio_threads));
+
+    for (j = 0; j < BIO_NUM_OPS; j++) {
+        pthread_mutex_init(&bio_mutex[j],NULL);
+        pthread_cond_init(&bio_newjob_cond[j],NULL);
+        pthread_cond_init(&bio_step_cond[j],NULL);
+        bio_jobs[j] = listCreate();
+        bio_pending[j] = 0;
+    }
+}
+
+static bool bioEmpty() {
+    int i;
+    for (i = 0; i < BIO_NUM_OPS;i++) {
+        if (bio_pending[i] > 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void bioSave(pthread_t *threads) {
+    int j;
+
+    while(!bioEmpty()) {
+        /* save bio thread */
+        memcpy(threads, bio_threads, sizeof(bio_threads));
+        serverLog(LL_WARNING, "Waiting for bio tasks complete");
+        usleep(100);
+    }
+
+    /* Initialization of state vars and objects */
+    for (j = 0; j < BIO_NUM_OPS; j++) {
+        listRelease(bio_jobs[j]);
+    }
+}
+
 /* Initialize the background system, spawning the thread. */
 void bioInit(void) {
     pthread_attr_t attr;

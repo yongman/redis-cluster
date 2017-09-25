@@ -72,6 +72,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #include "sha1.h"
 #include "endianconv.h"
 #include "crc64.h"
+#include "bio.h"
 
 /* Error codes */
 #define C_OK                    0
@@ -1283,6 +1284,14 @@ typedef struct {
 #define OBJ_HASH_KEY 1
 #define OBJ_HASH_VALUE 2
 
+struct wrapperContext {
+    struct redisServer server;
+    struct sharedObjectsStruct shared;
+    pthread_t bioThreads[BIO_NUM_OPS];
+    void *evictionpool;
+    bool reload;
+    char hashseed[16];
+};
 /*-----------------------------------------------------------------------------
  * Extern declarations
  *----------------------------------------------------------------------------*/
@@ -1321,6 +1330,8 @@ void moduleBlockedClientPipeReadable(aeEventLoop *el, int fd, void *privdata, in
 size_t moduleCount(void);
 void moduleAcquireGIL(void);
 void moduleReleaseGIL(void);
+void moduleDeinitModulesSystem(void);
+void moduleReloadModulesSystem(void);
 
 /* Utils */
 long long ustime(void);
@@ -1783,6 +1794,8 @@ void scriptingInit(int setup);
 int ldbRemoveChild(pid_t pid);
 void ldbKillForkedSessions(void);
 int ldbPendingChildren(void);
+void ldbRelease(void);
+void ldbSetup();
 
 /* Blocked clients */
 void processUnblockedClients(void);

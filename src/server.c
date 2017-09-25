@@ -1953,26 +1953,18 @@ void initServer() {
 }
 
 void reloadServer() {
-    //server = server_bak;
-
-    int j;
 
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSignalHandlers();
 
-    //reloadSharedObjects(sharedbak);
     adjustOpenFilesLimit();
 
-
-    evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     aofRewriteBufferReset();
 
     if (server.cluster_enabled) clusterReload();
 
-    scriptingInit(1);
-    bioKillThreads();
-    bioInit();
+    ldbSetup();
 }
 
 
@@ -2665,6 +2657,10 @@ int prepareForReload(int flags) {
     /* Best effort flush of slave output buffers, so that we hopefully
      * send them pending writes. */
     flushSlavesOutputBuffers();
+
+    /* Scripting relase */
+    ldbRelease();
+    moduleDeinitModulesSystem();
 
     serverLog(LL_WARNING,"%s is now ready to reload, see you later...",
         server.sentinel_mode ? "Sentinel" : "Redis");
@@ -3553,8 +3549,6 @@ static void sigShutdownHandler(int sig) {
     case SIGTERM:
         msg = "Received SIGTERM scheduling shutdown...";
         break;
-    case SIGUSR1:
-        msg = "Received SIGUSR1 signal...";
     default:
         msg = "Received shutdown signal, scheduling shutdown...";
     };
@@ -3569,10 +3563,6 @@ static void sigShutdownHandler(int sig) {
         exit(1); /* Exit with an error since this was not a clean shutdown. */
     } else if (server.loading) {
         exit(0);
-    } else if(sig == SIGUSR1) {
-        // exit the loop flag
-        serverLogFromHandler(LL_WARNING, "You insist... exiting loop now.");
-        server.el->stop = 1;
     }
 
     serverLogFromHandler(LL_WARNING, msg);
@@ -3584,7 +3574,6 @@ static void sigReloadHandler(int sig) {
     server.el->stop = 1;
 
     serverLogFromHandler(LL_WARNING, "Received SIGUSR1 signal...");
-    server.shutdown_asap = 1;
 }
 
 void setupSignalHandlers(void) {
@@ -3969,10 +3958,6 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-char *getDb() {
-    return server.db;
-}
-
 void serverSave(struct redisServer *s, struct sharedObjectsStruct *sos) {
     memcpy(s, &server, sizeof(server));
     memcpy(sos, &shared, sizeof(shared));
@@ -3983,12 +3968,13 @@ void serverRestore(struct redisServer *s, struct sharedObjectsStruct *sos) {
     memcpy(&shared, sos, sizeof(shared));
 }
 
-int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjectsStruct * sos, int reload, char *hashseed) {
-    struct timeval tv;
+int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
     int j;
 
-    if (reload) {
-        serverRestore(s, sos);
+    if (ctx->reload) {
+        serverRestore(&ctx->server, &ctx->shared);
+        bioRestore(ctx->bioThreads);
+        evictionPoolRestore(ctx->evictionpool);
     }
 
 #ifdef REDIS_TEST
@@ -4017,20 +4003,26 @@ int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjects
     }
 #endif
 
-    /* We need to initialize our libraries, and the server configuration. */
-    setlocale(LC_COLLATE,"");
-    zmalloc_set_oom_handler(redisOutOfMemoryHandler);
-    dictSetHashFunctionSeed((uint8_t*)hashseed);
-    server.sentinel_mode = checkForSentinelMode(argc,argv);
-    initServerConfig();
-    moduleInitModulesSystem();
+    dictSetHashFunctionSeed((uint8_t*)ctx->hashseed);
+    if (!ctx->reload) {
+        /* We need to initialize our libraries, and the server configuration. */
+        setlocale(LC_COLLATE,"");
+        zmalloc_set_oom_handler(redisOutOfMemoryHandler);
 
-    /* Store the executable path and arguments in a safe place in order
-     * to be able to restart the server later. */
-    server.executable = getAbsolutePath(argv[0]);
-    server.exec_argv = zmalloc(sizeof(char*)*(argc+1));
-    server.exec_argv[argc] = NULL;
-    for (j = 0; j < argc; j++) server.exec_argv[j] = zstrdup(argv[j]);
+
+        server.sentinel_mode = checkForSentinelMode(argc,argv);
+        initServerConfig();
+        moduleInitModulesSystem();
+
+        /* Store the executable path and arguments in a safe place in order
+         * to be able to restart the server later. */
+        server.executable = getAbsolutePath(argv[0]);
+        server.exec_argv = zmalloc(sizeof(char*)*(argc+1));
+        server.exec_argv[argc] = NULL;
+        for (j = 0; j < argc; j++) server.exec_argv[j] = zstrdup(argv[j]);
+    } else {
+        moduleReloadModulesSystem();
+    }
 
 
     /* We need to init sentinel right now as parsing the configuration file
@@ -4135,7 +4127,7 @@ int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjects
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
-    if (reload == 0) {
+    if (!ctx->reload) {
         initServer();
     } else {
         reloadServer();
@@ -4152,7 +4144,7 @@ int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjects
         linuxMemoryWarnings();
     #endif
         moduleLoadFromQueue();
-        if (reload == 0) {
+        if (ctx->reload == 0) {
             loadDataFromDisk();
         }
         if (server.cluster_enabled) {
@@ -4180,10 +4172,11 @@ int serverRun(int argc, char **argv, struct redisServer *s, struct sharedObjects
     aeSetAfterSleepProc(server.el,afterSleep);
     aeMain(server.el);
 
-    // do not delete el
-    //aeDeleteEventLoop(server.el);
     /* save server ctx to s */
-    serverSave(s, sos);
+    serverSave(&ctx->server, &ctx->shared);
+    bioSave(ctx->bioThreads);
+    evictionPoolSave(&ctx->evictionpool);
+
     return 0;
 }
 

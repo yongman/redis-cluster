@@ -34,6 +34,8 @@ unsigned long long bioPendingJobsOfType(int type);
 unsigned long long bioWaitStepOfType(int type);
 time_t bioOlderJobOfType(int type);
 void bioKillThreads(void);
+void bioSave(pthread_t *threads);
+void bioRestore(pthread_t *threads);
 
 /* Background job opcodes */
 #define BIO_CLOSE_FILE    0 /* Deferred close(2) syscall. */

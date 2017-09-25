@@ -152,6 +152,14 @@ void evictionPoolAlloc(void) {
     EvictionPoolLRU = ep;
 }
 
+void evictionPoolSave(struct evictionPoolEntry **entry) {
+    *entry = EvictionPoolLRU;
+}
+
+void evictionPoolRestore(struct evictionPoolEntry *entry) {
+    EvictionPoolLRU = entry;
+}
+
 /* This is an helper function for freeMemoryIfNeeded(), it is used in order
  * to populate the evictionPool with a few entries every time we want to
  * expire a key. Keys with idle time smaller than one of the current

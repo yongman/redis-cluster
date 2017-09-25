@@ -7,26 +7,21 @@
 
 #define LIB_REDIS_PATH "./redis-server.so"
 
-typedef int (*ENTRY)(int, char **, struct redisServer *, struct sharedObjectsStruct *, int, char *);
+typedef int (*ENTRY)(int, char **, struct wrapperContext *);
 typedef int (*RELOAD)(int);
 typedef char *(*GETDB)();
 
 int main(int argc, char ** argv)
 {
+    struct wrapperContext ctx;
     void *handle;
     ENTRY entry = NULL;
     RELOAD reload = NULL;
-    GETDB getDb = NULL;
-
-    char *db_addr = NULL;
     int ret;
-    struct redisServer *server;
-    struct sharedObjectsStruct *shared;
-    int isreload = 0;
 
-    // alloc mem for save server struct
-    server = (struct redisServer *)malloc(sizeof(struct redisServer));
-    shared = (struct sharedObjectsStruct *)malloc(sizeof(struct sharedObjectsStruct));
+    ctx.reload = false;
+
+    strncpy(ctx.hashseed, "1234567890123456", 16);
 
     for(;;) {
         printf("load dynamic library\n");
@@ -41,7 +36,7 @@ int main(int argc, char ** argv)
             fprintf(stderr, "%s\n", dlerror());
             exit(EXIT_FAILURE);
         }
-        entry(argc, argv, server, shared, isreload, "1234567890123456");
+        entry(argc, argv, &ctx);
 
         reload = (RELOAD)dlsym(handle, "prepareForReload");
         if (reload == NULL) {
@@ -55,9 +50,7 @@ int main(int argc, char ** argv)
             fprintf(stderr, "dlclose failed\n");
             exit(EXIT_FAILURE);
         }
-        isreload = 1;
+        ctx.reload = true;
     }
-    free(server);
-    free(shared);
     exit(EXIT_SUCCESS);
 }
