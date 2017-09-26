@@ -215,6 +215,15 @@ size_t zmalloc_used_memory(void) {
     return um;
 }
 
+void zmalloc_used_memory_save(size_t *m) {
+    size_t um = zmalloc_used_memory();
+    memcpy(m, &um, sizeof(size_t));
+}
+
+void zmalloc_used_memory_restore(size_t m) {
+    used_memory = m;
+}
+
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
     zmalloc_oom_handler = oom_handler;
 }

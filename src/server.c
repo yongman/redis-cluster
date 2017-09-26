@@ -55,6 +55,7 @@
 #include <sys/utsname.h>
 #include <locale.h>
 #include <sys/socket.h>
+#include <mcheck.h>
 
 /* Our shared "common" objects */
 
@@ -1523,6 +1524,26 @@ void initServerConfig(void) {
     server.assert_line = 0;
     server.bug_report_start = 0;
     server.watchdog_period = 0;
+}
+
+void reloadServerCommands() {
+    /* release old dict */
+    dictRelease(server.commands);
+    dictRelease(server.orig_commands);
+
+    /* re-add command to table */
+    server.commands = dictCreate(&commandTableDictType,NULL);
+    server.orig_commands = dictCreate(&commandTableDictType,NULL);
+    populateCommandTable();
+    server.delCommand = lookupCommandByCString("del");
+    server.multiCommand = lookupCommandByCString("multi");
+    server.lpushCommand = lookupCommandByCString("lpush");
+    server.lpopCommand = lookupCommandByCString("lpop");
+    server.rpopCommand = lookupCommandByCString("rpop");
+    server.sremCommand = lookupCommandByCString("srem");
+    server.execCommand = lookupCommandByCString("exec");
+    server.expireCommand = lookupCommandByCString("expire");
+    server.pexpireCommand = lookupCommandByCString("pexpire");
 }
 
 extern char **environ;
@@ -3975,6 +3996,7 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
         serverRestore(&ctx->server, &ctx->shared);
         bioRestore(ctx->bioThreads);
         evictionPoolRestore(ctx->evictionpool);
+        zmalloc_used_memory_restore(ctx->usedmemory);
     }
 
 #ifdef REDIS_TEST
@@ -4022,6 +4044,8 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
         for (j = 0; j < argc; j++) server.exec_argv[j] = zstrdup(argv[j]);
     } else {
         moduleReloadModulesSystem();
+        /* command adress may be changed, so reload it */
+        reloadServerCommands();
     }
 
 
@@ -4041,7 +4065,7 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
 
-    if (argc >= 2) {
+    if (!ctx->reload && argc >= 2) {
         j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
         char *configfile = NULL;
@@ -4125,15 +4149,14 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
 
     server.supervised = redisIsSupervised(server.supervised_mode);
     int background = server.daemonize && !server.supervised;
-    if (background) daemonize();
-
     if (!ctx->reload) {
+        if (background) daemonize();
         initServer();
+        redisSetProcTitle(argv[0]);
     } else {
         reloadServer();
     }
     if (background || server.pidfile) createPidFile();
-    redisSetProcTitle(argv[0]);
     redisAsciiArt();
     checkTcpBacklogSettings();
 
@@ -4144,7 +4167,7 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
         linuxMemoryWarnings();
     #endif
         moduleLoadFromQueue();
-        if (ctx->reload == 0) {
+        if (!ctx->reload) {
             loadDataFromDisk();
         }
         if (server.cluster_enabled) {
@@ -4172,10 +4195,18 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
     aeSetAfterSleepProc(server.el,afterSleep);
     aeMain(server.el);
 
+    if (ctx->reloadTimes == 0) {
+        mtrace();
+    }
+    if (ctx->reloadTimes == 200) {
+        muntrace();
+    }
+
     /* save server ctx to s */
     serverSave(&ctx->server, &ctx->shared);
     bioSave(ctx->bioThreads);
     evictionPoolSave(&ctx->evictionpool);
+    zmalloc_used_memory_save(&ctx->usedmemory);
 
     return 0;
 }

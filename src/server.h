@@ -1289,8 +1289,10 @@ struct wrapperContext {
     struct sharedObjectsStruct shared;
     pthread_t bioThreads[BIO_NUM_OPS];
     void *evictionpool;
-    bool reload;
+    unsigned reload:1;
     char hashseed[16];
+    unsigned int reloadTimes;
+    size_t usedmemory;
 };
 /*-----------------------------------------------------------------------------
  * Extern declarations

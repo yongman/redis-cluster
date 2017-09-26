@@ -19,9 +19,10 @@ int main(int argc, char ** argv)
     RELOAD reload = NULL;
     int ret;
 
-    ctx.reload = false;
+    ctx.reload = 0;
 
     strncpy(ctx.hashseed, "1234567890123456", 16);
+    ctx.reloadTimes = 0;
 
     for(;;) {
         printf("load dynamic library\n");
@@ -50,7 +51,8 @@ int main(int argc, char ** argv)
             fprintf(stderr, "dlclose failed\n");
             exit(EXIT_FAILURE);
         }
-        ctx.reload = true;
+        ctx.reload = 1;
+        ctx.reloadTimes++;
     }
     exit(EXIT_SUCCESS);
 }

@@ -86,6 +86,9 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
 size_t zmalloc_get_memory_size(void);
 void zlibc_free(void *ptr);
 
+void zmalloc_used_memory_restore(size_t m);
+void zmalloc_used_memory_save(size_t *m);
+
 #ifdef HAVE_DEFRAG
 void zfree_no_tcache(void *ptr);
 void *zmalloc_no_tcache(size_t size);

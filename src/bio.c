@@ -98,22 +98,19 @@ void bioRestore(pthread_t *threads) {
     memcpy(bio_threads, threads, sizeof(bio_threads));
 
     for (j = 0; j < BIO_NUM_OPS; j++) {
-        pthread_mutex_init(&bio_mutex[j],NULL);
-        pthread_cond_init(&bio_newjob_cond[j],NULL);
-        pthread_cond_init(&bio_step_cond[j],NULL);
         bio_jobs[j] = listCreate();
         bio_pending[j] = 0;
     }
 }
 
-static bool bioEmpty() {
+static unsigned bioEmpty() {
     int i;
     for (i = 0; i < BIO_NUM_OPS;i++) {
         if (bio_pending[i] > 0) {
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
 void bioSave(pthread_t *threads) {
