@@ -55,7 +55,6 @@
 #include <sys/utsname.h>
 #include <locale.h>
 #include <sys/socket.h>
-#include <mcheck.h>
 
 /* Our shared "common" objects */
 
@@ -4194,13 +4193,6 @@ int serverRun(int argc, char **argv, struct wrapperContext *ctx) {
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
     aeMain(server.el);
-
-    if (ctx->reloadTimes == 0) {
-        mtrace();
-    }
-    if (ctx->reloadTimes == 200) {
-        muntrace();
-    }
 
     /* save server ctx to s */
     serverSave(&ctx->server, &ctx->shared);
