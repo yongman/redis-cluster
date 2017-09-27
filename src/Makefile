@@ -144,6 +144,7 @@ endif
 
 REDIS_SERVER_SO=redis-server.so
 REDIS_SERVER_WRAP=redis-server-wrap
+REDIS_SERVER_WRAP_OBJ=redis-server-wrap.o
 REDIS_SERVER_NAME=redis-server
 REDIS_SENTINEL_NAME=redis-sentinel
 REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o
@@ -198,10 +199,14 @@ endif
 
 # redis-server.so
 $(REDIS_SERVER_SO): $(REDIS_SERVER_OBJ)
-	$(REDIS_LD) -shared -fPIC -o redis-server.so $(REDIS_SERVER_OBJ) -Wl,--whole-archive ../deps/lua/src/liblua.a -Wl,--no-whole-archive $(FINAL_LIBS)
+	$(REDIS_LD) -shared -fPIC -o $(REDIS_SERVER_NAME).so $(REDIS_SERVER_OBJ) -Wl,--whole-archive ../deps/lua/src/liblua.a -Wl,--no-whole-archive -lm -L../deps/jemalloc/lib -ljemalloc
 
-$(REDIS_SERVER_WRAP):
-	$(REDIS_CC) -rdynamic -o $(REDIS_SERVER_WRAP) $(REDIS_SERVER_WRAP).c -ldl -g -D_POSIX_C_SOURCE=199309L
+$(REDIS_SERVER_WRAP): $(REDIS_SERVER_WRAP_OBJ)
+	$(REDIS_LD) -rdynamic -o $(REDIS_SERVER_WRAP) $(REDIS_SERVER_WRAP_OBJ) -L../deps/jemalloc/lib -ljemalloc -ldl
+
+$(REDIS_SERVER_WRAP_OBJ):
+	$(REDIS_CC) -c $(REDIS_SERVER_WRAP).c -o $(REDIS_SERVER_WRAP_OBJ) -g -D_POSIX_C_SOURCE=199309L -I../deps/jemalloc/include
+
 # redis-server
 $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
 	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a $(FINAL_LIBS)
